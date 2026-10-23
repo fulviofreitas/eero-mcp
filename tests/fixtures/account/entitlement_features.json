@@ -1,0 +1,9 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:40Z" },
+  "data": {
+    "features": [
+      { "name": "ad_block", "active": true },
+      { "name": "advanced_content_filters", "active": true }
+    ]
+  }
+}

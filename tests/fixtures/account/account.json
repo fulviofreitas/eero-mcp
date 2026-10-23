@@ -1,0 +1,15 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:10Z" },
+  "data": {
+    "id": "user-0001",
+    "email": { "address": "user@example.com", "verified": true },
+    "name": { "first": "Test", "last": "User" },
+    "premium_status": "active",
+    "networks": {
+      "data": [
+        { "id": "network-0001", "url": "/2.2/networks/network-0001", "name": "Example-Network" },
+        { "id": "network-0002", "url": "/2.2/networks/network-0002", "name": "Second-Network" }
+      ]
+    }
+  }
+}

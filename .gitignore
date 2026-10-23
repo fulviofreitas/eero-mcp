@@ -14,7 +14,12 @@ lcov.info
 
 # Local env / secrets
 .env
+.env.*
 *.token
+# A credential record copied in to try EERO_MCP_SESSION_FILE (it holds a live session)
+cookies.json
+*.cookies.json
+
 
 # Live-test scratch captures (only scrubbed fixtures are committed)
 /tests/fixtures/live/*.raw.json

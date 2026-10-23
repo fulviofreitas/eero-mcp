@@ -1,0 +1,67 @@
+[package]
+name = "eero-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Read-only MCP server for the eero mesh Wi-Fi cloud API, built on rusteero"
+license = "MIT"
+repository = "https://github.com/fulviofreitas/eero-mcp"
+homepage = "https://github.com/fulviofreitas/eero-mcp"
+readme = "README.md"
+keywords = ["eero", "mcp", "wifi", "mesh", "model-context-protocol"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
+
+[lib]
+name = "eero_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eero-mcp"
+path = "src/main.rs"
+
+[features]
+default = ["keyring"]
+# Reads the shared OS keyring entry (read-only). Headless builds use `--no-default-features`.
+keyring = ["rusteero/keyring", "dep:keyring"]
+
+[dependencies]
+# Pinned to the v3.0.0 tag (crates.io only has 2.0.0). The explicit version next to the tag keeps
+# cargo-deny's wildcard ban satisfied. Default features off: `keyring` above re-enables its own.
+rusteero = { git = "https://github.com/fulviofreitas/rusteero", tag = "v3.0.0", version = "3.0.0", default-features = false }
+# The dependency must be named `rmcp`: its macros refer to the crate by that name.
+rmcp = { version = "3.7", features = ["server", "macros", "schemars", "transport-io"] }
+# Same version as rusteero's, so cargo unifies it. Used only for the raw, read-only entry read.
+keyring = { version = "4.2", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+secrecy = "0.10"
+jiff = "0.2"
+url = "2.5"
+anyhow = "1"
+
+[dev-dependencies]
+# Test-only: the in-process MCP client. The shipped binary never gets the `client` feature.
+rmcp = { version = "3.7", features = ["client"] }
+wiremock = "0.6"
+tokio = { version = "1", features = ["full", "test-util"] }
+anyhow = "1"
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+# `assert!(x.is_empty())` is the idiomatic shape used across the test suites; clippy 1.99's
+# `assert_is_empty` would have every one rewritten as `assert_eq!` for a nicer failure message.
+assert_is_empty = "allow"

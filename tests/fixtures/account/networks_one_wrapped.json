@@ -1,0 +1,8 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:15Z" },
+  "data": {
+    "networks": [
+      { "url": "/2.2/networks/network-0001", "name": "Example-Network", "status": "connected" }
+    ]
+  }
+}
