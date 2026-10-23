@@ -246,6 +246,9 @@ struct Session {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     seen: Vec<String>,
+    /// Drains the child's stderr while the session runs: the pipe holds 64 KiB, and a debug-level
+    /// log of a large `tools/list` result would otherwise block the server on its next write.
+    stderr: Option<std::thread::JoinHandle<String>>,
 }
 
 impl Session {
@@ -263,6 +266,12 @@ impl Session {
         let mut child = command.spawn().expect("the binary starts");
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout is piped");
+        let mut err = child.stderr.take().expect("stderr is piped");
+        let stderr = Some(std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut err, &mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
+        }));
         let (sender, lines) = channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -276,6 +285,7 @@ impl Session {
             stdin,
             lines,
             seen: Vec::new(),
+            stderr,
         }
     }
 
@@ -339,12 +349,12 @@ impl Session {
         }
     }
 
+    /// Everything the server wrote to stderr. Call it after `wait()`: the reader ends at EOF.
     fn stderr(&mut self) -> String {
-        let mut text = String::new();
-        if let Some(mut stderr) = self.child.stderr.take() {
-            std::io::Read::read_to_string(&mut stderr, &mut text).expect("read stderr");
-        }
-        text
+        self.stderr
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
     }
 }
 

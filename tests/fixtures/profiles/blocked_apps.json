@@ -1,0 +1,25 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:58Z" },
+  "data": {
+    "applications": [
+      {
+        "name": "example_video_app",
+        "display_name": "Example Video",
+        "is_blocked": true,
+        "categories": ["video"],
+        "image_asset_url": "https://assets.example.com/apps/example_video_app.png"
+      },
+      {
+        "name": "example_chat_app",
+        "display_name": "Example Chat",
+        "is_blocked": false,
+        "categories": ["social"],
+        "image_asset_url": "https://assets.example.com/apps/example_chat_app.png"
+      }
+    ],
+    "categories_list": [
+      { "id": "video", "title": "Video", "hide_from_app_list": false },
+      { "id": "social", "title": "Social", "hide_from_app_list": false }
+    ]
+  }
+}

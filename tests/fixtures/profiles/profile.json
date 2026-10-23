@@ -1,0 +1,23 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:50Z", "extra": "dropped" },
+  "data": {
+    "url": "/2.2/networks/network-0001/profiles/profile-0001",
+    "name": "Kids",
+    "paused": false,
+    "default": false,
+    "state": { "value": "active" },
+    "devices": [
+      {
+        "url": "/2.2/networks/network-0001/devices/device-0001",
+        "mac": "aa:bb:cc:00:00:01",
+        "nickname": "Example Tablet",
+        "connected": true,
+        "wireless": true
+      }
+    ],
+    "block_illegal_content": true,
+    "block_violent_content": false,
+    "schedule": [],
+    "proxied_nodes": []
+  }
+}

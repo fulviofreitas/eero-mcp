@@ -1,0 +1,27 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:01:10Z" },
+  "data": [
+    {
+      "url": "/2.2/networks/network-0001/forwards/forward-0001",
+      "description": "Example web server",
+      "protocol": "tcp",
+      "gateway_port": 8080,
+      "port": 80,
+      "ip": "192.0.2.11",
+      "reservation": {
+        "url": "/2.2/networks/network-0001/reservations/reservation-0001",
+        "mac": "aa:bb:cc:00:00:01"
+      },
+      "enabled": true
+    },
+    {
+      "url": "/2.2/networks/network-0001/forwards/forward-0002",
+      "description": "Example game server",
+      "protocol": "udp",
+      "gateway_port": 27015,
+      "port": 27015,
+      "ip": "192.0.2.12",
+      "enabled": false
+    }
+  ]
+}

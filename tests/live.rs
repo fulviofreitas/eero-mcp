@@ -47,6 +47,14 @@ const LIVE_READS: &[&str] = &[
     "get_network_scan",
     "list_activity_events",
     "list_notifications",
+    "list_profiles",
+    "list_port_forwards",
+    "list_dhcp_reservations",
+    "get_subnets",
+    "get_wpa3_settings",
+    "get_fast_transition",
+    "get_content_filter",
+    "get_backup_internet",
 ];
 
 fn live_enabled() -> bool {
