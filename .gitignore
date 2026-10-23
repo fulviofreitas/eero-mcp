@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Coverage
+*.profraw
+lcov.info
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local env / secrets
+.env
+*.token
+
+# Live-test scratch captures (only scrubbed fixtures are committed)
+/tests/fixtures/live/*.raw.json
+
+# graphify knowledge-graph outputs (local artifacts, never commit)
+graphify-out/
+
+# stray tool output
+*.log
