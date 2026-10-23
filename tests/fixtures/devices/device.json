@@ -1,0 +1,39 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:30Z", "extra": "dropped" },
+  "data": {
+    "url": "/2.2/networks/network-0001/devices/device-0001",
+    "mac": "aa:bb:cc:00:00:01",
+    "nickname": "Example Phone",
+    "hostname": "example-phone",
+    "display_name": "Example Phone",
+    "manufacturer": "Example Manufacturer",
+    "device_type": "phone",
+    "model_name": "Example Phone 1",
+    "ip": "192.0.2.101",
+    "ips": ["192.0.2.101"],
+    "ssid": "Example-Network",
+    "connected": true,
+    "wireless": true,
+    "connection_type": "wireless",
+    "interface": { "frequency": "5", "frequency_unit": "GHz", "rx_rate": "866" },
+    "source": {
+      "location": "Living Room",
+      "url": "/2.2/eeros/eero-0001",
+      "display_name": "Living Room",
+      "is_proxied_node": false
+    },
+    "profile": {
+      "name": "Adults",
+      "url": "/2.2/networks/network-0001/profiles/profile-0001",
+      "paused": false
+    },
+    "blacklisted": false,
+    "paused": false,
+    "prioritized": false,
+    "is_guest": false,
+    "first_active": "2025-12-01T08:00:00Z",
+    "last_active": "2026-01-01T00:00:00Z",
+    "usage": { "down_mbps": 1.5, "up_mbps": 0.5 },
+    "connectivity": { "score_bars": 4 }
+  }
+}

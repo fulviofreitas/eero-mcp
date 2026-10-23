@@ -1,0 +1,43 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:35Z", "extra": "dropped" },
+  "data": [
+    {
+      "url": "/2.2/eeros/eero-0001",
+      "serial": "SN-EXAMPLE-0001",
+      "mac_address": "AA:BB:CC:00:01:01",
+      "model": "eero Example Pro",
+      "os_version": "7.0.0-example",
+      "location": "Living Room",
+      "status": "green",
+      "gateway": true,
+      "is_primary_node": true,
+      "wired": true,
+      "led_on": true,
+      "ip_address": "192.0.2.11",
+      "connected_clients_count": 3,
+      "resources": {
+        "connections": "/2.2/eeros/eero-0001/connections"
+      },
+      "network": { "url": "/2.2/networks/network-0001", "name": "Example-Network" }
+    },
+    {
+      "url": "/2.2/eeros/eero-0002",
+      "serial": "SN-EXAMPLE-0002",
+      "mac_address": "AA:BB:CC:00:01:02",
+      "model": "eero Example Beacon",
+      "os_version": "7.0.0-example",
+      "location": "Bedroom",
+      "status": "yellow",
+      "gateway": false,
+      "is_primary_node": false,
+      "wired": false,
+      "led_on": true,
+      "ip_address": "192.0.2.12",
+      "connected_clients_count": 1,
+      "resources": {
+        "connections": "/2.2/eeros/eero-0002/connections"
+      },
+      "network": { "url": "/2.2/networks/network-0001", "name": "Example-Network" }
+    }
+  ]
+}

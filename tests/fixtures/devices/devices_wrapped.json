@@ -1,0 +1,15 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:26Z" },
+  "data": {
+    "devices": [
+      {
+        "url": "/2.2/networks/network-0001/devices/device-0001",
+        "mac": "aa:bb:cc:00:00:01",
+        "hostname": "example-phone",
+        "connected": true,
+        "internal_note": "dropped"
+      }
+    ],
+    "total": 1
+  }
+}
