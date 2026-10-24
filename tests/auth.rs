@@ -1380,6 +1380,65 @@ async fn logout_names_the_stores_it_could_not_check() -> anyhow::Result<()> {
     // Not being able to rule out a copy does not stop the sign-out and the deletion.
     assert_eq!(report.revoked.len(), 1);
     assert_eq!(report.removed, [StoreKind::File]);
+    // The shared keyring is switched off, never read: it is not a read error.
+    assert!(
+        !report
+            .not_checked
+            .contains(&NotChecked::Source(Source::SharedKeyring)),
+        "{:?}",
+        report.not_checked
+    );
+    Ok(())
+}
+
+/// Stores a session in the own file, then signs it out; the shared sources hold nothing.
+async fn log_out_a_file_session(
+    fx: &Fixture,
+    settings: &Settings,
+) -> anyhow::Result<eero_mcp::auth::LogoutReport> {
+    let chain = fx.chain(settings);
+    let store = OwnStore::production(settings);
+    mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
+    std::fs::create_dir_all(fx.own_dir())?;
+    std::fs::write(fx.own_file(), record(LOGIN_TOKEN))?;
+
+    let report = sign_out_own_session(settings.api_base_url.as_deref(), &store, &chain).await;
+
+    assert_eq!(report.revoked.len(), 1, "{report:?}");
+    assert_eq!(report.removed, [StoreKind::File]);
+    assert_eq!(targets_of(&fx.mock).await, ["POST /2.2/logout"]);
+    Ok(report)
+}
+
+#[tokio::test]
+async fn a_switched_off_keyring_is_not_reported_as_an_unreadable_shared_keyring()
+-> anyhow::Result<()> {
+    // EERO_MCP_NO_KEYRING=1: in the default build the keyring is switched off, in the headless
+    // build it does not exist. Either way nothing tries to read the shared eero-api entry.
+    let fx = Fixture::new().await;
+    let settings = fx.settings(&[]);
+    assert!(!fx.chain(&settings).keyring_active());
+
+    let report = log_out_a_file_session(&fx, &settings).await?;
+
+    // Only eero-mcp's own entry is named (an earlier record may survive there); the shared entry
+    // was never read, so nothing is claimed about it.
+    assert_eq!(report.not_checked, [NotChecked::Keyring]);
+    Ok(())
+}
+
+// The headless build with the keyring switch left on: the keyring cannot be read because it is not
+// compiled in, which is the same as switched off.
+#[cfg(not(feature = "keyring"))]
+#[tokio::test]
+async fn a_headless_build_never_claims_the_shared_keyring_was_unreadable() -> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    let settings = fx.settings_with_keyring(true, &[]);
+    assert!(!fx.chain(&settings).keyring_active());
+
+    let report = log_out_a_file_session(&fx, &settings).await?;
+
+    assert_eq!(report.not_checked, [NotChecked::Keyring]);
     Ok(())
 }
 
@@ -1754,6 +1813,74 @@ mod with_keyring {
         assert!(report.ok());
         assert!(!fx.own_file().exists());
         assert!(!keyring.load()?.is_valid());
+        Ok(())
+    }
+
+    /// A keyring that cannot be reached (no Secret Service, a locked keychain): every read fails.
+    struct Unreachable;
+
+    impl Sources for Unreachable {
+        fn keyring_record(&self, _entry: KeyringEntry) -> KeyringRead {
+            KeyringRead::Unavailable
+        }
+
+        fn read_file(&self, path: &Path) -> FileRead {
+            SystemSources.read_file(path)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_enabled_keyring_that_cannot_be_read_is_reported_as_not_checked()
+    -> anyhow::Result<()> {
+        let fx = Fixture::new().await;
+        mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
+        let settings = fx.settings_with_keyring(true, &[]);
+        let chain = Arc::new(CredentialChain::new(&settings, Arc::new(Unreachable)));
+        assert!(chain.keyring_active());
+        let store = OwnStore::with_backends(None, settings.own_file.clone());
+        std::fs::create_dir_all(fx.own_dir())?;
+        std::fs::write(fx.own_file(), record(LOGIN_TOKEN))?;
+
+        let report = sign_out_own_session(settings.api_base_url.as_deref(), &store, &chain).await;
+
+        // A real read error: both keyring entries are named, because a copy of the session cannot
+        // be ruled out there. It does not stop the sign-out or the deletion.
+        assert!(
+            report.not_checked.contains(&NotChecked::Keyring),
+            "{:?}",
+            report.not_checked
+        );
+        assert!(
+            report
+                .not_checked
+                .contains(&NotChecked::Source(Source::SharedKeyring)),
+            "{:?}",
+            report.not_checked
+        );
+        assert_eq!(report.revoked.len(), 1);
+        assert_eq!(report.removed, [StoreKind::File]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_enabled_keyring_that_can_be_read_leaves_nothing_unchecked() -> anyhow::Result<()> {
+        let fx = Fixture::new().await;
+        mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
+        let keyring = Arc::new(MemoryStore::new());
+        let (settings, chain) = stand_in_chain(&fx, &keyring);
+        let store = OwnStore::with_backends(
+            Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
+            settings.own_file.clone(),
+        );
+        std::fs::create_dir_all(fx.own_dir())?;
+        std::fs::write(fx.own_file(), record(LOGIN_TOKEN))?;
+
+        let report = sign_out_own_session(settings.api_base_url.as_deref(), &store, &chain).await;
+
+        // Both keyring entries were read (found empty): nothing to report.
+        assert!(report.not_checked.is_empty(), "{:?}", report.not_checked);
+        assert_eq!(report.revoked.len(), 1);
+        assert_eq!(report.removed, [StoreKind::File]);
         Ok(())
     }
 

@@ -557,6 +557,7 @@ above.
   | Operation | Requests |
   |---|---|
   | `login` tool, `eero-mcp login` | `POST /2.2/login` (eero sends the code), `POST /2.2/login/resend` (only when you ask for a new code), `POST /2.2/login/verify` |
+  | `login` tool, `eero-mcp login`, only when the login replaced an earlier session in eero-mcp's own store | `POST /2.2/logout`, once for each distinct replaced session (at most 2), sent after the new session is saved and in use, so the old one does not stay live; skipped for a session that another source also holds |
   | `eero-mcp login`, only when the session could not be saved | `POST /2.2/logout` for that new session, so no unsaved session stays live |
   | `eero-mcp logout` | `POST /2.2/logout`, once for each distinct session found in eero-mcp's own store and in no other source |
   | `eero-mcp status` | one `GET /2.2/account` |

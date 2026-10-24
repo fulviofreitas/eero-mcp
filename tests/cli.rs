@@ -552,6 +552,19 @@ async fn logout_signs_the_stored_session_out_deletes_it_and_names_the_keyring_as
         "EERO_MCP_NO_KEYRING is 1: {}",
         run.stdout
     );
+    // The shared eero-api entry is not read at all with the keyring off, so nothing is said about
+    // it: no "could not be read" claim, in the default or the headless build.
+    assert!(
+        !run.stdout.contains("eero-api keyring") && !run.stdout.contains("could not be read"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        run.stdout.matches("Not checked").count(),
+        1,
+        "only the eero-mcp keyring entry is named: {}",
+        run.stdout
+    );
     assert!(
         run.stdout.contains("eeroctl file"),
         "the next source: {}",

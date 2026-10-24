@@ -326,9 +326,11 @@ impl fmt::Debug for Resolved {
 pub enum Probe {
     /// A usable token.
     Token(SecretString),
-    /// The source was read and holds nothing usable (or is not configured).
+    /// The source holds nothing usable: it was read and is empty, or it is not consulted at all
+    /// (not configured, or a keyring that is switched off or not compiled in), so no copy of a
+    /// token can be there for the server to use.
     Empty,
-    /// The source could not be read (an unreachable or disabled keyring, an unreadable or
+    /// The source is consulted but could not be read (an unreachable keyring, an unreadable or
     /// unparsable file): a copy of a token there cannot be ruled out.
     NotChecked,
 }
@@ -643,8 +645,10 @@ impl CredentialChain {
     }
 
     fn probe_keyring(&self, entry: KeyringEntry) -> Probe {
+        // A keyring that is switched off or not compiled in is never read, so there is no read
+        // that could fail: it counts as holding no copy. Only a real read error is `NotChecked`.
         if !self.keyring_active() {
-            return Probe::NotChecked;
+            return Probe::Empty;
         }
         match self.try_keyring(entry) {
             KeyringTry::Token(token) => Probe::Token(token),
@@ -1348,21 +1352,52 @@ mod tests {
             resolved_name(&chain),
             Some(("eero-mcp file", "own-file".to_owned()))
         );
+        // A keyring that is switched off is not consulted, so the probes find no copy there; the
+        // own keyring entry is still reported as unchecked, because an earlier record may survive.
+        assert!(matches!(chain.probe(Source::SharedKeyring), Probe::Empty));
+        assert!(matches!(chain.probe(Source::OwnKeyring), Probe::Empty));
         assert_eq!(*fake.keyring_calls.lock().expect("lock"), 0);
-        assert!(matches!(
-            chain.probe(Source::SharedKeyring),
-            Probe::NotChecked
-        ));
         assert!(matches!(chain.own_records().keyring, OwnRecord::NotChecked));
     }
 
     #[cfg(not(feature = "keyring"))]
     #[test]
-    fn headless_builds_report_the_keyring_as_not_checked() {
-        let chain = chain(&OWN_DIR_ENV[..2], Fake::new(KeyringRead::Missing));
+    fn headless_builds_find_no_copy_in_a_keyring_they_never_read() {
+        // The switch is on, but the keyring feature is not compiled in.
+        let fake = Fake::new(KeyringRead::Unavailable).with_own_keyring(KeyringRead::Unavailable);
+        let chain = chain(&OWN_DIR_ENV[..1], fake);
         assert!(!chain.keyring_active());
-        assert!(matches!(chain.probe(Source::OwnKeyring), Probe::NotChecked));
+        assert!(matches!(chain.probe(Source::SharedKeyring), Probe::Empty));
+        assert!(matches!(chain.probe(Source::OwnKeyring), Probe::Empty));
         assert!(matches!(chain.own_records().keyring, OwnRecord::NotChecked));
+    }
+
+    #[cfg(feature = "keyring")]
+    #[test]
+    fn an_active_keyring_is_probed_and_only_a_read_error_is_not_checked() {
+        for (read, expected) in [
+            (KeyringRead::record(record("t")), "token"),
+            (KeyringRead::record("not json".to_owned()), "empty"),
+            (KeyringRead::Missing, "empty"),
+            (KeyringRead::Unavailable, "not checked"),
+        ] {
+            for source in [Source::SharedKeyring, Source::OwnKeyring] {
+                let fake = match source {
+                    Source::OwnKeyring => {
+                        Fake::new(KeyringRead::Missing).with_own_keyring(read.clone())
+                    }
+                    _ => Fake::new(read.clone()),
+                };
+                let chain = chain(&OWN_DIR_ENV[..1], fake);
+                assert!(chain.keyring_active());
+                let got = match chain.probe(source) {
+                    Probe::Token(_) => "token",
+                    Probe::Empty => "empty",
+                    Probe::NotChecked => "not checked",
+                };
+                assert_eq!(got, expected, "{source:?} {read:?}");
+            }
+        }
     }
 
     #[test]
