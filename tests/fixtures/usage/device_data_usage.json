@@ -1,0 +1,36 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:15Z" },
+  "data": {
+    "device": {
+      "url": "/2.2/networks/network-0001/devices/aa:bb:cc:00:00:01",
+      "mac": "aa:bb:cc:00:00:01",
+      "display_name": "Example Laptop",
+      "hostname": "example-laptop",
+      "manufacturer": "Example Corp",
+      "device_type": "laptop_computer",
+      "download": 2500000,
+      "upload": 250000
+    },
+    "start": "2026-10-16T00:00:00Z",
+    "end": "2026-10-23T00:00:00Z",
+    "limit": null,
+    "series": [
+      {
+        "type": "download",
+        "sum": 2500000,
+        "values": [
+          { "time": "2026-10-16T00:00:00Z", "value": 1500000 },
+          { "time": "2026-10-17T00:00:00Z", "value": 1000000 }
+        ]
+      },
+      {
+        "type": "upload",
+        "sum": 250000,
+        "values": [
+          { "time": "2026-10-16T00:00:00Z", "value": 150000 },
+          { "time": "2026-10-17T00:00:00Z", "value": 100000 }
+        ]
+      }
+    ]
+  }
+}

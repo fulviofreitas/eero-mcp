@@ -55,6 +55,13 @@ const LIVE_READS: &[&str] = &[
     "get_fast_transition",
     "get_content_filter",
     "get_backup_internet",
+    // Usage group. The three tools that need a device or profile id are left out: the sweep
+    // passes no arguments.
+    "get_data_usage",
+    "get_devices_data_usage",
+    "get_eeros_data_usage",
+    "get_insights",
+    "get_devices_insights",
 ];
 
 fn live_enabled() -> bool {
