@@ -122,6 +122,18 @@ impl ToolError {
         Self::new(ErrorCode::UpstreamError, UNEXPECTED_RESPONSE)
     }
 
+    /// Rewords an `authentication_required` error after the credential re-read found a credential
+    /// but it is the one that just failed. Without this, a call whose session was cleared by a
+    /// concurrent failed refresh would say that no credential is available. Other codes are
+    /// returned unchanged.
+    #[must_use]
+    pub(crate) fn with_credential_rejected(mut self) -> Self {
+        if self.code == ErrorCode::AuthenticationRequired {
+            AUTH_SESSION.clone_into(&mut self.message);
+        }
+        self
+    }
+
     /// An `internal_error` with fixed text.
     pub fn internal() -> Self {
         Self::new(ErrorCode::InternalError, INTERNAL)
@@ -322,6 +334,21 @@ mod tests {
             envelope: None,
             error_code: None,
         }
+    }
+
+    #[test]
+    fn a_found_but_rejected_credential_is_never_reported_as_missing() {
+        let missing = map_error(&authentication(None, None), None);
+        assert_eq!(missing.message, AUTH_NO_CREDENTIAL);
+        let rejected = missing.with_credential_rejected();
+        assert_eq!(rejected.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(rejected.message, AUTH_SESSION);
+        let plain_401 =
+            map_error(&authentication(Some(401), None), None).with_credential_rejected();
+        assert_eq!(plain_401.message, AUTH_SESSION);
+        // Other codes keep their text.
+        let not_found = ToolError::not_found("gone").with_credential_rejected();
+        assert_eq!(not_found.message, "gone");
     }
 
     #[test]

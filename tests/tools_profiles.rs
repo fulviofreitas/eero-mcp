@@ -12,6 +12,7 @@ use rmcp::object;
 use serde_json::{Value, json};
 
 const GROUP: &str = "profiles";
+const REDACTED: &str = "[REDACTED]";
 
 fn profiles_fixture(name: &str) -> String {
     fixture(GROUP, name)
@@ -915,6 +916,81 @@ async fn get_profile_blocked_apps_uses_the_only_network_when_network_id_is_omitt
             format!("GET {APPLICATIONS_ROUTE}")
         ]
     );
+    Ok(())
+}
+
+// ===================== redaction, on every tool =====================
+
+#[tokio::test]
+async fn every_profile_read_redacts_secrets() -> anyhow::Result<()> {
+    // Synthetic secrets under deny-listed keys, at the top level and nested.
+    let body = |data: Value| {
+        json!({"meta": {"code": 200, "server_time": "2026-01-01T00:00:15Z"}, "data": data})
+            .to_string()
+    };
+    let h = Harness::start().await?;
+    h.mount_get(
+        PROFILES_ROUTE,
+        &body(json!([{"name": "Adults", "password": "profilepass000"}])),
+        1,
+    )
+    .await;
+    h.mount_get(
+        PROFILE_ROUTE,
+        &body(json!({"name": "Adults", "token": "profiletoken000", "pin": {"secret": "pinsecret000"}})),
+        1,
+    )
+    .await;
+    h.mount_get(
+        SCHEDULES_ROUTE,
+        &body(json!([{"name": "Bedtime", "api_key": "schedulekey000"}])),
+        1,
+    )
+    .await;
+    h.mount_get(
+        APPLICATIONS_ROUTE,
+        &body(json!({"applications": [{"name": "Example", "access_token": "appaccess000"}]})),
+        1,
+    )
+    .await;
+    let profile = object!({"network_id": "network-0001", "profile_id": "profile-0001"});
+
+    let list = h
+        .call_ok_hiding(
+            "list_profiles",
+            object!({"network_id": "network-0001"}),
+            &["profilepass000"],
+        )
+        .await?;
+    assert_eq!(list["data"][0]["password"], REDACTED);
+    assert_eq!(list["data"][0]["name"], "Adults");
+
+    let one = h
+        .call_ok_hiding(
+            "get_profile",
+            profile.clone(),
+            &["profiletoken000", "pinsecret000"],
+        )
+        .await?;
+    assert_eq!(one["data"]["token"], REDACTED);
+    assert_eq!(one["data"]["pin"]["secret"], REDACTED);
+    assert_eq!(one["data"]["name"], "Adults");
+
+    let schedules = h
+        .call_ok_hiding(
+            "list_profile_schedules",
+            profile.clone(),
+            &["schedulekey000"],
+        )
+        .await?;
+    assert_eq!(schedules["data"][0]["api_key"], REDACTED);
+    assert_eq!(schedules["data"][0]["name"], "Bedtime");
+
+    let apps = h
+        .call_ok_hiding("get_profile_blocked_apps", profile, &["appaccess000"])
+        .await?;
+    assert_eq!(apps["data"]["applications"][0]["access_token"], REDACTED);
+    assert_eq!(apps["data"]["applications"][0]["name"], "Example");
     Ok(())
 }
 

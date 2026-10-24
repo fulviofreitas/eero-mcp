@@ -13,8 +13,9 @@ use anyhow::Context as _;
 use eero_mcp::config::{EnvMap, Settings};
 use eero_mcp::credentials::{CredentialChain, Resolver, resolve_at_startup};
 use eero_mcp::{EeroMcp, client_builder};
-use rmcp::ServiceExt as _;
+use rmcp::service::RunningService;
 use rmcp::transport::stdio;
+use rmcp::{RoleServer, ServiceExt as _};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
@@ -97,6 +98,30 @@ async fn run() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
+    // Install the signal handlers before anything else: a signal that arrives during startup or
+    // the handshake then ends the server cleanly (status 0) instead of killing the process. It
+    // also interrupts a startup that is stuck, such as a keyring read waiting for an unlock.
+    let mut shutdown = Shutdown::install().context("cannot install the signal handlers")?;
+
+    let service = tokio::select! {
+        started = start() => started?,
+        () = shutdown.recv() => return Ok(()),
+    };
+    let cancel = service.cancellation_token();
+    tokio::spawn(async move {
+        shutdown.recv().await;
+        cancel.cancel();
+    });
+    service
+        .waiting()
+        .await
+        .context("the MCP server stopped abnormally")?;
+    Ok(())
+}
+
+/// Resolves the configuration and the credential, builds the Client and starts serving over stdio
+/// (the future completes once the handshake reply is written).
+async fn start() -> anyhow::Result<RunningService<RoleServer, EeroMcp>> {
     let settings = Settings::from_env(&EnvMap::from_process())?;
     let chain = Arc::new(CredentialChain::from_settings(&settings));
     let token = resolve_at_startup(Arc::clone(&chain)).await?;
@@ -114,41 +139,48 @@ async fn run() -> anyhow::Result<()> {
     let resolver = Resolver::new(chain);
     let server = EeroMcp::new(client, resolver);
 
-    let service = server
+    server
         .serve(stdio())
         .await
-        .context("cannot start the MCP server on stdio")?;
-    let cancel = service.cancellation_token();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        cancel.cancel();
-    });
-    service
-        .waiting()
-        .await
-        .context("the MCP server stopped abnormally")?;
-    Ok(())
+        .context("cannot start the MCP server on stdio")
 }
 
-/// Resolves on an interrupt, or on a termination signal where the platform has one.
-async fn shutdown_signal() {
+/// The interrupt and termination signals, registered when installed so none is missed later.
+struct Shutdown {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Shutdown {
+    fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                terminate: signal(SignalKind::terminate())?,
+                interrupt: signal(SignalKind::interrupt())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+
+    /// Resolves on the next interrupt, or termination signal where the platform has one.
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.terminate.recv() => {}
+            _ = self.interrupt.recv() => {}
+        }
+        #[cfg(windows)]
+        let _ = self.ctrl_c.recv().await;
     }
 }

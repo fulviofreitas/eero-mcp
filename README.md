@@ -81,9 +81,12 @@ All environment variables:
 | Variable | Meaning | Default |
 |---|---|---|
 | `RUSTEERO_SESSION_TOKEN` | Session token, the first credential source. Changing it needs a restart, and while it is set it wins over keyring and file re-logins. | unset |
-| `EERO_MCP_SESSION_FILE` | Path of a credential-record file (the record format that eero-api 8.x and eeroctl write). When set it replaces eeroctl's default file; set but empty fails startup. | unset |
-| `EEROCTL_CONFIG_DIR` | eeroctl's configuration directory; its `cookies.json` is the default credential file. | unset |
-| `EERO_MCP_API_BASE_URL` | API base URL override, for testing against a local mock only. Accepted for `https`, or `http` on a loopback host; any other value fails startup. | the production eero cloud API |
+| `EERO_MCP_SESSION_FILE` | Path of a credential-record file (the record format that eero-api 8.x and eeroctl write). When set it replaces eeroctl's default file; set but empty fails startup. Used literally: `~` is not expanded (MCP host `env` maps do not expand it either), so give an absolute path. | unset |
+| `EEROCTL_CONFIG_DIR` | eeroctl's configuration directory; its `cookies.json` is the default credential file. Used literally: `~` is not expanded (MCP host `env` maps do not expand it either), so give an absolute path. | unset |
+| `HOME` | Non-Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `~/.config/eeroctl/cookies.json` under it (an empty value counts as unset). | set by the OS |
+| `APPDATA` | Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `%APPDATA%\eeroctl\cookies.json`. | set by Windows |
+| `EERO_MCP_API_BASE_URL` | API base URL override, for testing against a local mock only. Accepted for `https`, or `http` on `localhost`, `127.0.0.1` or `[::1]`, with no user name, password, query or fragment; any other value fails startup. | the production eero cloud API |
+| `EERO_MCP_LIVE` | Tests only: `1` lets the ignored live tests run. | unset |
 | `RUST_LOG` | Log filter. Logs go to stderr. | `warn` |
 
 **Keyring and headless builds.** The default build includes the `keyring` feature (Secret Service
@@ -307,11 +310,11 @@ text block (for hosts that predate structured content), for example from `list_d
 | `network_id` | tools that take `network_id` | the network actually queried, as a bare id |
 | `server_time` | when eero sends it | the server time from eero's response metadata |
 | `window` | `get_channel_utilization` and the usage and insight tools | the effective time window |
-| `detail`, `count` | `list_devices` | the mode used and the number of devices |
+| `detail`, `count` | `list_devices` | the mode used and the number of devices; if eero sends a shape with no recognisable device list, `data` is the raw (redacted) data, `detail` is `full` and `count` is absent |
 
 Tools return eero's `data` as-is, so field names match eero's API and nothing drifts when eero
-changes a payload. Only `list_networks` unwraps its list container, and only `list_devices` trims
-anything (in its default mode).
+changes a payload. `list_networks` and `list_devices` unwrap their list containers, and only
+`list_devices` trims entries (in its default mode).
 
 **`list_devices`: summary versus full.** Real networks have 100 or more devices of about 2 KB
 each, so `detail: "summary"` (the default) keeps only the useful fields, when present: `id`, `url`,
@@ -329,8 +332,9 @@ live; `get_eero` is never cached and has no `refresh`. Choosing a default networ
 network list.
 
 **Time windows.** These apply to `get_channel_utilization` and the usage and insight tools.
-`start` and `end` are RFC 3339 timestamps such as `2026-10-16T00:00:00Z`; `start` must be before
-`end`. With both omitted the window is the last 7 days ending now (the last 24 hours for
+`start` and `end` are RFC 3339 timestamps such as `2026-10-16T00:00:00Z` (strict RFC 3339: a `T`
+separator, seconds, and `Z` or a `+HH:MM` offset; a space separator or `+0000` is rejected);
+`start` must be before `end`. With both omitted the window is the last 7 days ending now (the last 24 hours for
 `get_channel_utilization`); with one omitted the other is derived with the same span. The result
 echoes the effective `window`.
 
@@ -341,16 +345,17 @@ echoes the effective `window`.
 | `insight_type` | `inspected`, `blocked`, `malware`, `phishing`, `botnet`, `filtered`, `adult`, `illegal`, `violent`, `adblock`, `datausage` | `blocked` |
 | `band` | `band_2_4GHz`, `band_5GHz_low`, `band_5GHz_high`, `band_5GHz_full`, `band_6GHz` | not sent |
 
-`list_speed_tests` takes optional `start` and `end` that are passed through unchanged, with no
-default window. `limit` and `page_size` accept 1 to 100; `before` is an RFC 3339 cursor timestamp;
-`granularity` and `busy_threshold` are positive integers.
+`list_speed_tests` takes optional `start` and `end` (RFC 3339; with both given `start` must be
+before `end`) that are passed through unchanged, with no default window. `limit` and `page_size` accept 1 to 100; `before` is an RFC 3339 cursor timestamp;
+`granularity` and `busy_threshold` are integers from 1 to 4294967295.
 
 **Redaction.** Every result is redacted recursively: a value is replaced by `"[REDACTED]"` when its
 key, compared case-insensitively, exactly equals one of: `password`, `passphrase`, `psk`,
-`pre_shared_key`, `wpa_key`, `network_key`, `pskc`, `master_key`, `private_key`, `secret`,
-`client_secret`, `api_key`, `token`, `user_token`, `access_token`, `refresh_token`, `session_id`,
-`session_token`, `auth_token`, `temporary_token`, `activation_token`, `guardian_secret`,
-`authentication_key`, `commissioning_credential`, `pppoe_credentials`. Null and empty values are
+`pre_shared_key`, `wpa_key`, `network_key`, `pskc`, `master_key`, `active_operational_dataset`,
+`private_key`, `secret`, `client_secret`, `api_key`, `token`, `user_token`, `access_token`,
+`refresh_token`, `session_id`, `session_token`, `auth_token`, `temporary_token`,
+`activation_token`, `guardian_secret`, `authentication_key`, `commissioning_credential`,
+`pppoe_credentials`. Null and empty values are
 kept, so "no password set" stays visible. Matching is exact on purpose: MAC addresses, SSIDs,
 serial numbers and email addresses are **not** redacted, because they are the data you are asking
 about.
@@ -450,8 +455,10 @@ and read-only guard tests. All fixtures are synthetic, and a tripwire expects ze
 requests.
 
 The live tests (`tests/live.rs`) read the real eero cloud through a hand-written read-only
-allowlist. They are `#[ignore]`d, additionally gated on `EERO_MCP_LIVE=1`, print only result codes
-and counts, and are meant to be run by a person, never in CI:
+allowlist. They are `#[ignore]`d, additionally gated on `EERO_MCP_LIVE=1`, print only result codes,
+top-level key names, counts and whether a credential was found (never bodies or identifiers), fail
+on a malformed result or an undocumented error code, and are meant to be run by a person, never in
+CI:
 
 ```bash
 EERO_MCP_LIVE=1 cargo test --all-features --test live -- --ignored --nocapture
@@ -476,7 +483,13 @@ names, input names and types, output members, error codes and configuration vari
 - **403 and 404 on some accounts or firmware.** `get_transfer_stats` returns a 403 on some
   accounts, and some endpoints answer 404 on some firmware or networks.
 - **Undocumented API.** The API is reverse-engineered and can change; data is returned as-is, so
-  new or renamed fields pass through, and unexpected responses become `upstream_error`.
+  new or renamed fields pass through, and unexpected responses become `upstream_error`. One
+  exception: if the network list arrives in an unrecognised container, it is treated as empty, so
+  `list_networks` returns `[]` and omitting `network_id` returns `not_found`.
+- **Names are untrusted text.** Device names and hostnames are set by the devices that join your
+  network (the guest network included), and neighbouring Wi-Fi network names (SSIDs) by anyone in
+  radio range. The server tells the agent to treat them as data, never as instructions, but a
+  host that acts on tool results should still treat them as untrusted input.
 - **Cached reads can be up to 60 seconds old.** Use `refresh: true` where a tool offers it.
 - **No login flow, one account per process.** The server cannot log in (the one-time-code flow
   sends a message and cannot prompt over stdio). Run a second server entry for a second account and

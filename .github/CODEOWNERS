@@ -30,3 +30,13 @@
 /.releaserc.json        @fulviofreitas
 /commitlint.config.js   @fulviofreitas
 /rust-toolchain.toml    @fulviofreitas
+
+# The files that enforce the read-only and secret-safety guarantees: the guard test (banned
+# and allowed lists, pinned exceptions), the hygiene test, the harness that mounts the write
+# tripwire, the redaction deny-list and the error mapping. Weakening any of them would let a
+# write path or a leaked secret through with a green build.
+/tests/read_only_guard.rs   @fulviofreitas
+/tests/public_hygiene.rs    @fulviofreitas
+/tests/common/mod.rs        @fulviofreitas
+/src/redact.rs              @fulviofreitas
+/src/errors.rs              @fulviofreitas

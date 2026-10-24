@@ -10,16 +10,27 @@
 //! - the credential-store and login types, and the lower layers that bypass the Client: the
 //!   transport, the endpoint API types, the route and endpoint tables, the storage helpers, the
 //!   explicit session setters and the session refresh;
-//! - the keyring crate's write calls and every file-system write (outside `#[cfg(test)]` code);
+//! - the keyring crate beyond one read: outside `#[cfg(test)]` code `keyring::` may only name
+//!   `Entry::new` and `Error::NoEntry`, the entry's public `inner` handle and every write or
+//!   escape-hatch method of the keyring crates are banned, and so is every file-system write and
+//!   every call that changes a file through an open handle (permissions, times, length);
 //! - `Session::from_env` (it reads the real process environment).
+//!
+//! The names without an underscore (`logout`, `store`) count when they are called, called with a
+//! turbofish, or reached through a path (`Client::logout` taken as a function value).
+//!
+//! Where the session token can be sent is pinned too: building a Client (`builder`, `base_url`)
+//! and reading its session (`session`) are allowed in `src/server.rs` only, and `base_url` is
+//! applied exactly once there.
 //!
 //! Two exceptions are pinned to one site each, matched as that exact chain, and anything else
 //! fails, whatever the call syntax (`client.api()`, `Client::api(&client)`, `rusteero::Client::api`):
 //!
 //! - `src/ids.rs` reads the configured API host through the Client's API accessor, then its
 //!   transport, then `api_host`, exactly once (rusteero exposes the host no other way).
-//! - `src/server.rs` calls the Client's async session-token setter exactly once, for the
-//!   credential re-read. It changes in-memory state only, because no store is attached.
+//! - `src/server.rs` uses the Client's async session-token setter exactly once (called, or taken
+//!   as a function value), for the credential re-read. It changes in-memory state only, because no
+//!   store is attached.
 //!
 //! The banned lists are generated from rusteero v3.0.0's `Client` (`src/client/*.rs`): every public
 //! function that is not one of its 78 reads, minus the read-only accessors and harmless builder
@@ -296,8 +307,10 @@ const BANNED_TYPES: &[&str] = &[
     "StorageConfig",
 ];
 
-/// Functions below the `Client` that write, refresh or bypass it, and the keyring crate's write
-/// calls. Every name contains an underscore, so each counts anywhere it appears.
+/// Functions below the `Client` that write, refresh or bypass it, the keyring crates' write and
+/// escape-hatch calls, and the file-handle calls that change a file without opening it for writing
+/// (`fchmod` and `futimens` work on a read-only descriptor). Every name contains an underscore, so
+/// each counts anywhere it appears.
 const BANNED_FUNCTIONS: &[&str] = &[
     "create_storage",
     "save_async",
@@ -313,13 +326,44 @@ const BANNED_FUNCTIONS: &[&str] = &[
     "set_password",
     "set_secret",
     "delete_credential",
+    // keyring 4.2: `Entry::inner` is the public keyring_core entry, whose attribute update, raw
+    // credential (downcast to a backend that deletes whole collections) and the process-wide
+    // store setters are not reachable through the read-only `Entry::get_password`.
+    "update_attributes",
+    "get_credential",
+    "as_any",
+    "delete_target",
+    "set_default_store",
+    "unset_default_store",
+    "new_with_credential",
+    "set_default_credential_builder",
     "remove_file",
     "remove_dir",
     "remove_dir_all",
+    "set_permissions",
+    "set_modified",
+    "set_times",
+    "set_len",
 ];
 
-/// Other names that are always banned.
-const BANNED_IDENTS: &[&str] = &["OpenOptions"];
+/// Other names that are always banned. `keyring_core` is the keyring crate's backend layer: its
+/// whole API is out of bounds.
+const BANNED_IDENTS: &[&str] = &["OpenOptions", "keyring_core"];
+
+/// The only paths through the keyring crate that non-test code may name: building the shared entry
+/// and matching the missing-entry error. The one method called on the entry is `get_password`.
+const ALLOWED_KEYRING_PATHS: &[&str] = &["keyring::Entry::new", "keyring::Error::NoEntry"];
+
+/// The keyring entry's public field, which exposes the backend entry. Banned where `keyring::` is
+/// used.
+const KEYRING_ENTRY_FIELD: &str = "inner";
+
+/// Client items that decide which origin receives the session token or hand out the session. Used
+/// in [`CLIENT_BUILD_FILE`] only.
+const PINNED_CLIENT_ITEMS: &[&str] = &["builder", "base_url", "session"];
+const CLIENT_BUILD_FILE: &str = "src/server.rs";
+/// The origin override is applied at exactly one place in [`CLIENT_BUILD_FILE`].
+const ORIGIN_SETTER: &str = "base_url";
 
 /// rusteero modules that reach below the `Client`. A path through one of them is banned unless it
 /// starts with one of the exact [`ALLOWED_RUSTEERO_PATHS`].
@@ -404,6 +448,16 @@ fn followed_by_paren(text: &str, end: usize) -> bool {
     text[end..].trim_start().starts_with('(')
 }
 
+/// Whether the identifier at `offset` (`len` bytes) is used rather than merely mentioned:
+/// called (`name(`), called with a turbofish or continued as a path (`name::<T>(`), or reached
+/// through a path (`Type::name`), which also covers taking it as a function value
+/// (`.then(Client::logout)`, `let f = Client::set_session_token;`).
+fn is_used(text: &str, offset: usize, len: usize) -> bool {
+    followed_by_paren(text, offset + len)
+        || text[offset + len..].trim_start().starts_with("::")
+        || text[..offset].trim_end().ends_with("::")
+}
+
 /// The path that continues from the identifier at `start`, with whitespace removed: identifiers
 /// joined by `::`, and a final `{...}` group. `rusteero :: routes ::\n ApiVersion;` gives
 /// `rusteero::routes::ApiVersion`.
@@ -428,10 +482,36 @@ fn path_from(text: &str, start: usize) -> String {
     path
 }
 
-/// The part of a source file before its `#[cfg(test)]` module (every file here puts its unit tests
-/// last).
+/// The byte offset of a file's unit-test module: a line that is exactly `#[cfg(test)]` (at column
+/// 0, so a comment or a string that merely mentions it does not count) directly followed by a
+/// `mod tests` line.
+fn test_module_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_end() == "#[cfg(test)]"
+            && lines
+                .peek()
+                .is_some_and(|next| next.starts_with("mod tests"))
+        {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The part of a source file before its unit-test module (every file here puts its unit tests
+/// last; [`scan_test_module_is_last`] enforces it).
 fn non_test_part(text: &str) -> &str {
-    text.find("#[cfg(test)]").map_or(text, |end| &text[..end])
+    test_module_start(text).map_or(text, |end| &text[..end])
+}
+
+/// Whether `path` is `allowed` or continues it as a longer path (`allowed::...`), not merely a
+/// longer name (`keyring::Entry::new_with_target` does not match `keyring::Entry::new`).
+fn path_allowed(path: &str, allowed: &str) -> bool {
+    path.strip_prefix(allowed)
+        .is_some_and(|rest| !rest.starts_with(is_ident))
 }
 
 /// Offsets of uses of the Client's raw API accessor, however it is written: `.api(`, `Client::api(`,
@@ -475,8 +555,11 @@ fn scan(path: &str, text: &str) -> Vec<Finding> {
     };
     scan_banned_names(&mut report);
     scan_rusteero_paths(&mut report);
+    scan_keyring(&mut report);
     scan_file_writes(&mut report);
+    scan_test_module_is_last(&mut report);
     scan_session_setter(&mut report);
+    scan_client_construction(&mut report);
     scan_api_accessor(&mut report);
     report.findings
 }
@@ -486,7 +569,7 @@ fn scan_banned_names(report: &mut Report<'_>) {
     let text = report.text;
     for name in WRITE_AND_ACTION_METHODS.iter().chain(UNEXPOSED_READS) {
         for offset in ident_matches(text, name) {
-            if call_only(name) && !followed_by_paren(text, offset + name.len()) {
+            if call_only(name) && !is_used(text, offset, name.len()) {
                 continue;
             }
             report.at(
@@ -539,7 +622,7 @@ fn scan_rusteero_paths(report: &mut Report<'_>) {
         if BANNED_RUSTEERO_MODULES.contains(&module)
             && !ALLOWED_RUSTEERO_PATHS
                 .iter()
-                .any(|allowed| path_text.starts_with(allowed))
+                .any(|allowed| path_allowed(&path_text, allowed))
         {
             report.at(
                 offset,
@@ -554,6 +637,64 @@ fn scan_rusteero_paths(report: &mut Report<'_>) {
                 "`Session::from_env` reads the real process environment".to_owned(),
             );
         }
+    }
+}
+
+/// The keyring crate outside the unit tests: only the pinned paths, and not the entry's public
+/// `inner` handle. (`rusteero::storage::keyring::...` is another crate's path, checked by
+/// [`scan_rusteero_paths`].)
+fn scan_keyring(report: &mut Report<'_>) {
+    let code = non_test_part(report.text);
+    let mut uses_crate = false;
+    for offset in ident_matches(code, "keyring") {
+        if code[..offset].trim_end().ends_with("::") {
+            continue;
+        }
+        let path_text = path_from(code, offset);
+        if !path_text.starts_with("keyring::") {
+            continue;
+        }
+        uses_crate = true;
+        if !ALLOWED_KEYRING_PATHS
+            .iter()
+            .any(|allowed| path_allowed(&path_text, allowed))
+        {
+            report.at(
+                offset,
+                format!("`{path_text}`: only keyring::Entry::new and keyring::Error::NoEntry may be named"),
+            );
+        }
+    }
+    if uses_crate {
+        for offset in ident_matches(code, KEYRING_ENTRY_FIELD) {
+            report.at(
+                offset,
+                format!(
+                    "`{KEYRING_ENTRY_FIELD}` reaches the keyring backend entry; call get_password only"
+                ),
+            );
+        }
+    }
+}
+
+/// The unit-test module must be the last item of its file: the file-write scan stops at it, so
+/// code placed after it would never be scanned as non-test code. Column-0 lines after the module
+/// header may only be its closing brace.
+fn scan_test_module_is_last(report: &mut Report<'_>) {
+    let Some(start) = test_module_start(report.text) else {
+        return;
+    };
+    let mut offset = start;
+    for (index, line) in report.text[start..].split_inclusive('\n').enumerate() {
+        let body = line.trim_end();
+        if index >= 2 && !body.is_empty() && !body.starts_with([' ', '\t']) && body != "}" {
+            report.at(
+                offset,
+                "code after the unit-test module is not scanned as non-test code".to_owned(),
+            );
+            return;
+        }
+        offset += line.len();
     }
 }
 
@@ -604,15 +745,51 @@ fn scan_session_setter(report: &mut Report<'_>) {
         }
         return;
     }
-    let calls: Vec<usize> = all
-        .into_iter()
-        .filter(|&offset| followed_by_paren(text, offset + SESSION_SETTER.len()))
-        .collect();
-    if calls.len() > 1 {
+    let uses = setter_uses(text);
+    if uses.len() > 1 {
         report.at(
-            calls[1],
-            format!("`{SESSION_SETTER}` may be called exactly once in {SESSION_SETTER_FILE}"),
+            uses[1],
+            format!("`{SESSION_SETTER}` may be used exactly once in {SESSION_SETTER_FILE}"),
         );
+    }
+}
+
+/// Offsets of uses of the session-token setter: calls and function values (`Client::set_session_token`
+/// taken without a call, then called any number of times). Prose that names it is not a use.
+fn setter_uses(text: &str) -> Vec<usize> {
+    ident_matches(text, SESSION_SETTER)
+        .into_iter()
+        .filter(|&offset| is_used(text, offset, SESSION_SETTER.len()))
+        .collect()
+}
+
+/// Building a Client and reading its session: `Client::builder`, the origin override and the
+/// `session` accessor and builder setter are used in one file only, where the origin override is
+/// applied exactly once. A handler that built a second Client, or handed the session to one, could
+/// send the token to an origin the configuration never allowed.
+fn scan_client_construction(report: &mut Report<'_>) {
+    let text = report.text;
+    for name in PINNED_CLIENT_ITEMS {
+        let uses: Vec<usize> = ident_matches(text, name)
+            .into_iter()
+            .filter(|&offset| is_used(text, offset, name.len()))
+            .collect();
+        if report.path != CLIENT_BUILD_FILE {
+            for offset in uses {
+                report.at(
+                    offset,
+                    format!(
+                        "`{name}` decides where the session token goes; it is allowed in \
+                         {CLIENT_BUILD_FILE} only"
+                    ),
+                );
+            }
+        } else if *name == ORIGIN_SETTER && uses.len() > 1 {
+            report.at(
+                uses[1],
+                format!("`{name}` may be applied exactly once in {CLIENT_BUILD_FILE}"),
+            );
+        }
     }
 }
 
@@ -714,15 +891,27 @@ fn src_names_no_write_action_session_or_store_item() {
 fn both_pinned_exceptions_exist_where_they_are_allowed() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let server = fs::read_to_string(root.join(SESSION_SETTER_FILE)).expect("server.rs");
-    // One call site: the credential re-read. (Doc comments may name the method; a call is the
-    // identifier followed by an argument list, however it is qualified.)
-    let calls = ident_matches(&server, SESSION_SETTER)
-        .into_iter()
-        .filter(|&offset| followed_by_paren(&server, offset + SESSION_SETTER.len()))
-        .count();
+    // One use: the credential re-read. (Doc comments may name the method; a use is a call, however
+    // it is qualified, or a function value.)
     assert_eq!(
-        calls, 1,
-        "the session-token setter is called exactly once in {SESSION_SETTER_FILE}"
+        setter_uses(&server).len(),
+        1,
+        "the session-token setter is used exactly once in {SESSION_SETTER_FILE}"
+    );
+    let uses_of = |name: &str| {
+        ident_matches(&server, name)
+            .into_iter()
+            .filter(|&offset| is_used(&server, offset, name.len()))
+            .count()
+    };
+    assert_eq!(
+        uses_of(ORIGIN_SETTER),
+        1,
+        "the origin override is applied exactly once in {CLIENT_BUILD_FILE}"
+    );
+    assert!(
+        uses_of("builder") >= 1 && uses_of("session") >= 1,
+        "the Client is built and its session read in {CLIENT_BUILD_FILE}"
     );
     let ids = fs::read_to_string(root.join(API_CHAIN_FILE)).expect("ids.rs");
     let compact: String = ids.chars().filter(|c| !c.is_whitespace()).collect();
@@ -970,6 +1159,32 @@ fn single_word_names_count_only_as_calls() {
 }
 
 #[test]
+fn single_word_names_are_caught_as_function_values_and_with_a_turbofish() {
+    for sneaky in [
+        "let f = Client::logout;",
+        "let f = rusteero::Client::logout;",
+        "let f = <Client>::logout;",
+        "let f = Client\n    ::logout;",
+        "maybe.then(Client::logout)",
+        "b.map(ClientBuilder::store)",
+        "let s = ClientBuilder::store;",
+        "builder.store::<Store>(x)",
+        "client.logout::<()>()",
+    ] {
+        assert!(!findings("src/x.rs", sneaky).is_empty(), "{sneaky}");
+    }
+    // Prose, and ordinary identifiers that happen to contain the words, stay fine.
+    for fine in [
+        "// logout is never called; no store is attached",
+        "/// the credential store: see the logout docs.",
+        "let restore = 1; let logouts = 2;",
+        "let store_ok = true;",
+    ] {
+        assert_eq!(findings("src/x.rs", fine), Vec::<String>::new(), "{fine}");
+    }
+}
+
+#[test]
 fn the_session_setter_is_allowed_in_server_rs_only_and_once() {
     let code = "client.set_session_token(token).await";
     assert!(findings("src/server.rs", code).is_empty());
@@ -999,6 +1214,36 @@ fn the_session_setter_is_allowed_in_server_rs_only_and_once() {
             &format!("// calls set_session_token once\n{code}")
         )
         .is_empty()
+    );
+}
+
+#[test]
+fn the_session_setter_taken_as_a_function_value_counts_as_a_use() {
+    let code = "client.set_session_token(token).await";
+    // Taking it as a value, then calling the value any number of times, is a second use.
+    for value in [
+        "let install = Client::set_session_token;",
+        "let install = rusteero::Client::set_session_token;",
+        "let install = <Client>::set_session_token;",
+        "let install = Client::set_session_token::<>;",
+    ] {
+        assert!(
+            !findings("src/server.rs", &format!("{code}; {value}")).is_empty(),
+            "{value}"
+        );
+        assert!(!findings("src/ids.rs", value).is_empty(), "{value}");
+    }
+    // The value alone is one use, which is the allowed count.
+    assert!(
+        findings(
+            "src/server.rs",
+            "let install = Client::set_session_token; install(&c, t).await;"
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        setter_uses("// set_session_token\nlet i = Client::set_session_token;").len(),
+        1
     );
 }
 
@@ -1103,6 +1348,12 @@ fn credential_and_file_writes_are_banned_outside_unit_tests() {
         "tokio::fs::write(path, data).await?;",
         "include!(\"elsewhere.rs\");",
         "#[path = \"elsewhere.rs\"] mod elsewhere;",
+        // Calls on an open handle that change the file although it was opened read-only.
+        "file.set_permissions(perms)?;",
+        "file.set_modified(time)?;",
+        "file.set_times(times)?;",
+        "file.set_len(0)?;",
+        "std::fs::set_permissions(path, perms)?;",
     ] {
         assert!(!findings("src/x.rs", sneaky).is_empty(), "{sneaky}");
     }
@@ -1125,6 +1376,127 @@ fn credential_and_file_writes_are_banned_outside_unit_tests() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn the_keyring_crate_is_limited_to_one_entry_read() {
+    // What credentials.rs does.
+    let fine = "use rusteero::storage::keyring::{ACCOUNT_NAME, SERVICE_NAME};\n\
+                let Ok(entry) = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME) else { return };\n\
+                match entry.get_password() { Err(keyring::Error::NoEntry) => {}, _ => {} }";
+    assert_eq!(findings("src/credentials.rs", fine), Vec::<String>::new());
+    // Anything else the crate offers, however it is reached.
+    for sneaky in [
+        "use keyring::Entry;",
+        "use keyring::{Entry, Error};",
+        "keyring::Entry::new_with_target(t, s, u)",
+        "keyring::Error::Invalid(a, b)",
+        "keyring::v1::Entry::new(s, u)",
+        "let handle = &entry.inner;",
+        "let keyring::Entry { inner } = entry;",
+        "entry.inner.update_attributes(&attrs)?;",
+        "entry.inner.get_credential().as_any()",
+        "keyring_core::set_default_store(store)",
+        "keyring_core::unset_default_store()",
+        "keyring_core::Entry::new_with_credential(c)",
+        "wrapper.delete_target()",
+        "keyring::Entry::new(s, u)?.set_default_credential_builder(b)",
+    ] {
+        assert!(
+            !findings(
+                "src/credentials.rs",
+                &format!("let _ = keyring::Entry::new(s, u);\n{sneaky}")
+            )
+            .is_empty(),
+            "{sneaky}"
+        );
+    }
+    // `inner` is an ordinary identifier where the keyring crate is not used.
+    assert_eq!(
+        findings("src/errors.rs", "let inner = value[\"error\"].as_object();"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_mention_of_the_test_attribute_does_not_hide_the_rest_of_the_file() {
+    // The old scan cut at the first literal `#[cfg(test)]` anywhere, comments and strings included.
+    for mention in [
+        "// the unit tests sit behind #[cfg(test)]\n",
+        "/// see `#[cfg(test)]`\n",
+        "const NOTE: &str = \"#[cfg(test)]\";\n",
+        "    #[cfg(test)]\n",
+        "#[cfg(test)]\nfn helper() {}\n",
+    ] {
+        let source = format!("{mention}fn f() {{ std::fs::write(p, d); }}\n");
+        assert!(
+            !findings("src/x.rs", &source).is_empty(),
+            "a file write after {mention:?} is still found"
+        );
+    }
+    // The real shape still exempts the unit tests.
+    let source = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { std::fs::write(p, d); }\n}\n";
+    assert_eq!(findings("src/x.rs", source), Vec::<String>::new());
+}
+
+#[test]
+fn the_unit_test_module_must_be_the_last_item() {
+    let after = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn g() { std::fs::write(p, d); }\n";
+    let found = findings("src/x.rs", after);
+    assert!(
+        found
+            .iter()
+            .any(|what| what.contains("after the unit-test module")),
+        "{found:?}"
+    );
+    let comment_after = "fn f() {}\n#[cfg(test)]\nmod tests {\n}\n// trailing note\n";
+    assert!(!findings("src/x.rs", comment_after).is_empty());
+    let last = "fn f() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn t() {}\n}\n";
+    assert_eq!(findings("src/x.rs", last), Vec::<String>::new());
+}
+
+#[test]
+fn client_construction_and_the_session_accessor_are_pinned_to_server_rs() {
+    let build = "let mut b = Client::builder().get_retries(1);\n\
+                 b = b.base_url(url);\n\
+                 b.session(token)";
+    assert_eq!(findings("src/server.rs", build), Vec::<String>::new());
+    let accessor = "client.session().filter(Session::is_valid)";
+    assert_eq!(findings("src/server.rs", accessor), Vec::<String>::new());
+    for sneaky in [
+        "Client::builder().build().await",
+        "rusteero::Client::builder()",
+        "let b = ClientBuilder::base_url;",
+        "Client::builder().base_url(agent_url).session(self.shared.client.session()).build()",
+        "self.shared.client.session()",
+        "builder.session(s)",
+        "b.base_url(u)",
+        "Client::builder::<>()",
+    ] {
+        assert!(
+            !findings("src/tools/devices.rs", sneaky).is_empty(),
+            "{sneaky}"
+        );
+        assert!(!findings("src/main.rs", sneaky).is_empty(), "{sneaky}");
+    }
+    // The origin override is applied once, even in server.rs.
+    let twice = "b.base_url(url); b.base_url(other);";
+    assert!(!findings("src/server.rs", twice).is_empty());
+    // Ordinary words and other crates' builders are not Client construction.
+    for fine in [
+        "tokio::runtime::Builder::new_multi_thread().enable_all().build()",
+        "let session = Session::from_json(record)?; session.token()",
+        "settings.api_base_url.as_deref()",
+        "\"error.session.expired\"",
+        "// the builder sets the base_url for the session",
+        "ServerCapabilities::default()",
+    ] {
+        assert_eq!(
+            findings("src/credentials.rs", fine),
+            Vec::<String>::new(),
+            "{fine}"
+        );
+    }
 }
 
 #[test]

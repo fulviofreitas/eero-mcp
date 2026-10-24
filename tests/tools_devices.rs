@@ -562,8 +562,107 @@ async fn a_summary_over_an_unrecognised_shape_falls_back_to_the_raw_redacted_dat
         json!({"message": "no device list here", "token": REDACTED})
     );
     assert_eq!(out["detail"], "full");
-    assert_eq!(out["count"], 0);
+    assert!(
+        out.get("count").is_none(),
+        "no recognisable list: no count, 0 would claim an empty network"
+    );
     assert!(!out.to_string().contains("devicetoken000"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_devices_redacts_secrets_in_summary_and_full_mode() -> anyhow::Result<()> {
+    let h = Harness::start().await?;
+    // Synthetic secrets under deny-listed keys: a device-level key the summary drops, and nested
+    // values the summary copies verbatim (`ips`, a non-object `profile`).
+    let body = json!({
+        "meta": {"code": 200, "server_time": "2026-01-01T00:00:15Z"},
+        "data": [{
+            "url": "/2.2/networks/network-0001/devices/device-0001",
+            "mac": "aa:bb:cc:00:00:01",
+            "hostname": "example-host",
+            "password": "devicepass000",
+            "ips": [{"ip": "192.0.2.101", "psk": "ippsk000"}],
+            "profile": [{"name": "Adults", "token": "profiletoken000"}],
+            "source": "plain-source"
+        }]
+    })
+    .to_string();
+    h.mount_get(LIST_ROUTE, &body, 2).await;
+    let secrets = ["devicepass000", "ippsk000", "profiletoken000"];
+
+    let summary = h
+        .call_ok_hiding(
+            "list_devices",
+            object!({"network_id": "network-0001", "refresh": true}),
+            &secrets,
+        )
+        .await?;
+    assert_eq!(summary["detail"], "summary");
+    assert_eq!(summary["data"][0]["ips"][0]["psk"], REDACTED);
+    assert_eq!(summary["data"][0]["ips"][0]["ip"], "192.0.2.101");
+    assert_eq!(summary["data"][0]["profile"][0]["token"], REDACTED);
+    assert_eq!(summary["data"][0]["profile"][0]["name"], "Adults");
+    assert_eq!(summary["data"][0]["source"], "plain-source");
+    assert!(
+        summary["data"][0].get("password").is_none(),
+        "the summary does not copy this key at all"
+    );
+
+    let full = h
+        .call_ok_hiding(
+            "list_devices",
+            object!({"network_id": "network-0001", "refresh": true, "detail": "full"}),
+            &secrets,
+        )
+        .await?;
+    assert_eq!(full["detail"], "full");
+    assert_eq!(full["data"][0]["password"], REDACTED);
+    assert_eq!(full["data"][0]["ips"][0]["psk"], REDACTED);
+    assert_eq!(full["data"][0]["profile"][0]["token"], REDACTED);
+    assert_eq!(full["data"][0]["hostname"], "example-host");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_other_device_reads_redact_secrets_too() -> anyhow::Result<()> {
+    let h = Harness::start().await?;
+    let body = |data: Value| {
+        json!({"meta": {"code": 200, "server_time": "2026-01-01T00:00:15Z"}, "data": data})
+            .to_string()
+    };
+    h.mount_get(
+        DEVICE_ROUTE,
+        &body(json!({"hostname": "example-host", "password": "devicepass000"})),
+        1,
+    )
+    .await;
+    h.mount_get(
+        "/2.2/networks/network-0001/blacklist",
+        &body(json!([{"mac": "aa:bb:cc:00:00:01", "token": "blocktoken000"}])),
+        1,
+    )
+    .await;
+
+    let device = h
+        .call_ok_hiding(
+            "get_device",
+            object!({"network_id": "network-0001", "device_id": "device-0001"}),
+            &["devicepass000"],
+        )
+        .await?;
+    assert_eq!(device["data"]["password"], REDACTED);
+    assert_eq!(device["data"]["hostname"], "example-host");
+
+    let blocked = h
+        .call_ok_hiding(
+            "list_blocked_devices",
+            object!({"network_id": "network-0001"}),
+            &["blocktoken000"],
+        )
+        .await?;
+    assert_eq!(blocked["data"][0]["token"], REDACTED);
+    assert_eq!(blocked["data"][0]["mac"], "aa:bb:cc:00:00:01");
     Ok(())
 }
 
@@ -1490,7 +1589,7 @@ async fn the_description_of_list_devices_names_every_summary_field_and_the_count
         "prioritized",
         "first and last active",
         "detail to full",
-        "count is not meaningful",
+        "count is absent",
     ] {
         assert!(description.contains(needle), "{needle}: {description}");
     }

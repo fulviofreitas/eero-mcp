@@ -66,9 +66,11 @@ pub fn range_1_100(schema: &mut Schema) {
     integer_range(schema, 1, Some(100));
 }
 
-/// A schemars field transform for a positive integer (`granularity`, `busy_threshold`).
+/// A schemars field transform for a positive integer up to [`u32::MAX`] (`granularity`,
+/// `busy_threshold`): the bound [`positive_integer`] enforces, published so the schema and the
+/// runtime check agree.
 pub fn positive(schema: &mut Schema) {
-    integer_range(schema, 1, None);
+    integer_range(schema, 1, Some(i64::from(u32::MAX)));
 }
 
 /// A schemars field transform for a count (zero or more): single `integer` type with a `minimum`
@@ -305,16 +307,10 @@ pub fn page_size(value: Option<i64>) -> Result<Option<u32>, ToolError> {
     bounded("page_size", value, 1, 100)
 }
 
-/// A positive integer (`granularity`, `busy_threshold`): zero and negatives are rejected.
+/// A positive integer (`granularity`, `busy_threshold`): 1 to [`u32::MAX`]; zero, negatives and
+/// larger values are rejected.
 pub fn positive_integer(field: &'static str, value: Option<i64>) -> Result<Option<u32>, ToolError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    u32::try_from(value)
-        .ok()
-        .filter(|checked| *checked >= 1)
-        .map(Some)
-        .ok_or_else(|| ToolError::invalid_argument(field, "must be a positive integer"))
+    bounded(field, value, 1, u32::MAX)
 }
 
 /// Input of tools that take only `refresh` (`get_account`, `list_networks`).
@@ -506,7 +502,7 @@ mod tests {
         let granularity = &schema["properties"]["granularity"];
         assert_eq!(granularity["type"], "integer");
         assert_eq!(granularity["minimum"], 1);
-        assert!(granularity.get("maximum").is_none());
+        assert_eq!(granularity["maximum"], 4_294_967_295_u32);
     }
 
     #[test]
@@ -659,6 +655,7 @@ mod tests {
         for bad in [0, -5, 4_294_967_296] {
             let error = positive_integer("busy_threshold", Some(bad)).expect_err("invalid");
             assert_eq!(error.field.as_deref(), Some("busy_threshold"));
+            assert_eq!(error.message, "must be an integer from 1 to 4294967295");
             assert!(
                 !error.message.contains(&bad.to_string()),
                 "never echoes the value"

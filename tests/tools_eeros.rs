@@ -11,6 +11,7 @@ use rmcp::object;
 use serde_json::{Value, json};
 
 const GROUP: &str = "eeros";
+const REDACTED: &str = "[REDACTED]";
 
 fn eeros_fixture(name: &str) -> String {
     fixture(GROUP, name)
@@ -270,6 +271,72 @@ async fn list_eeros_rejects_a_bad_network_id_and_unknown_fields_before_any_reque
         );
     }
     h.assert_no_requests().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_eero_read_redacts_secrets() -> anyhow::Result<()> {
+    // Synthetic secrets under deny-listed keys, at the top level and nested.
+    let body = |data: Value| {
+        json!({"meta": {"code": 200, "server_time": "2026-01-01T00:00:15Z"}, "data": data})
+            .to_string()
+    };
+    let h = Harness::start().await?;
+    h.mount_get(
+        "/2.2/networks/network-0001/eeros",
+        &body(json!([{
+            "url": "/2.2/eeros/eero-0001",
+            "location": "Living Room",
+            "password": "eeropass000",
+            "wifi": {"psk": "eeropsk000"}
+        }])),
+        1,
+    )
+    .await;
+    h.mount_get(
+        "/2.2/eeros/eero-0001",
+        &body(json!({
+            "location": "Living Room",
+            "token": "eerotoken000",
+            "thread": {"master_key": "eerokey000", "channel": 15}
+        })),
+        1,
+    )
+    .await;
+    h.mount_get(
+        "/2.2/eeros/eero-0001/connections",
+        &body(json!({"clients": [{"mac": "aa:bb:cc:00:00:01", "passphrase": "connphrase000"}]})),
+        1,
+    )
+    .await;
+    let node = object!({"network_id": "network-0001", "eero_id": "eero-0001"});
+
+    let list = h
+        .call_ok_hiding(
+            "list_eeros",
+            object!({"network_id": "network-0001"}),
+            &["eeropass000", "eeropsk000"],
+        )
+        .await?;
+    assert_eq!(list["data"][0]["password"], REDACTED);
+    assert_eq!(list["data"][0]["wifi"]["psk"], REDACTED);
+    assert_eq!(list["data"][0]["location"], "Living Room");
+
+    let eero = h
+        .call_ok_hiding("get_eero", node.clone(), &["eerotoken000", "eerokey000"])
+        .await?;
+    assert_eq!(eero["data"]["token"], REDACTED);
+    assert_eq!(eero["data"]["thread"]["master_key"], REDACTED);
+    assert_eq!(eero["data"]["thread"]["channel"], 15);
+
+    let connections = h
+        .call_ok_hiding("list_eero_connections", node, &["connphrase000"])
+        .await?;
+    assert_eq!(connections["data"]["clients"][0]["passphrase"], REDACTED);
+    assert_eq!(
+        connections["data"]["clients"][0]["mac"],
+        "aa:bb:cc:00:00:01"
+    );
     Ok(())
 }
 

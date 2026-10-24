@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Strings that name documents or repositories a public reader cannot open.
 fn needles() -> Vec<String> {
@@ -38,36 +39,88 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn is_text(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| {
-        ["rs", "md", "toml", "json", "yml", "yaml", "txt"]
-            .iter()
-            .any(|known| ext == *known)
+/// Directories of local tooling and build output that are not part of the published tree.
+const SKIPPED_DIRS: &[&str] = &["target", ".git", "graphify-out", ".claude", ".cursor"];
+
+/// Local tooling files that are not part of the published tree (assembled at run time, like the
+/// needles, so this file does not contain the name).
+fn skipped_files() -> Vec<String> {
+    vec![["CLAUDE", ".md"].concat()]
+}
+
+/// Every file under `dir` except the local tooling and build output, whatever its extension.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if path.is_dir() {
+            if !SKIPPED_DIRS.contains(&name.as_str()) {
+                walk(&path, out);
+            }
+        } else if !skipped_files().contains(&name) {
+            out.push(path);
+        }
+    }
+}
+
+/// The git-tracked files, or `None` when this is not a git checkout (a source tarball, say).
+fn tracked_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let files: Vec<PathBuf> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| std::str::from_utf8(name).ok())
+        .map(|name| root.join(name))
+        .collect();
+    (!files.is_empty()).then_some(files)
+}
+
+/// Every file that ships with the repository: the tracked files, else the whole crate tree.
+fn shipped_files(root: &Path) -> Vec<PathBuf> {
+    tracked_files(root).unwrap_or_else(|| {
+        let mut files = Vec::new();
+        walk(root, &mut files);
+        files
     })
 }
 
 #[test]
 fn tracked_files_do_not_reference_private_material() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    for dir in ["src", "tests", ".github"] {
-        if root.join(dir).is_dir() {
-            collect(&root.join(dir), &mut files);
-        }
-    }
-    for name in ["README.md", "Cargo.toml", "NOTICE", "deny.toml"] {
-        if root.join(name).is_file() {
-            files.push(root.join(name));
-        }
-    }
+    let files = shipped_files(&root);
     assert!(files.len() > 20, "the scan found the tree: {}", files.len());
+    // Files the old extension filter skipped must now be in the scan.
+    for required in [
+        ".github/renovate.json5",
+        "CITATION.cff",
+        ".gitignore",
+        "VERSION",
+    ] {
+        assert!(
+            files.iter().any(|file| file.ends_with(required)),
+            "{required} is scanned"
+        );
+    }
 
     let needles = needles();
     let mut found = Vec::new();
-    for file in files
-        .iter()
-        .filter(|file| is_text(file) || file.extension().is_none())
-    {
+    for file in &files {
+        // A file that cannot be read as UTF-8 text (or no longer exists) has nothing to scan.
         let Ok(text) = fs::read_to_string(file) else {
             continue;
         };

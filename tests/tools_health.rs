@@ -242,7 +242,7 @@ async fn the_input_schemas_publish_ranges_enumerations_and_string_ids() -> anyho
     for name in ["granularity", "busy_threshold"] {
         assert_eq!(channels[name]["type"], "integer", "{name}");
         assert_eq!(channels[name]["minimum"], 1, "{name}");
-        assert!(channels[name].get("maximum").is_none(), "{name}");
+        assert_eq!(channels[name]["maximum"], 4_294_967_295_u32, "{name}");
     }
     let words = |name: &str| {
         channels[name]["description"]

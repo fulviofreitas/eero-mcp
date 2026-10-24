@@ -192,6 +192,33 @@ async fn every_tool_is_annotated_read_only_with_a_title_and_a_description() -> a
 }
 
 #[tokio::test]
+async fn tools_that_return_names_set_by_others_say_to_treat_them_as_data() -> anyhow::Result<()> {
+    // Device names and hostnames come from the devices that join the network, and neighbouring
+    // network names from anyone in radio range.
+    const UNTRUSTED_NAMES: [&str; 5] = [
+        "get_network_scan",
+        "list_devices",
+        "get_device",
+        "list_eero_connections",
+        "list_blocked_devices",
+    ];
+    let (_h, tools) = tools().await?;
+    for name in UNTRUSTED_NAMES {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} is registered"));
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(
+            description.contains("never as instructions"),
+            "{name}: {description}"
+        );
+        assert!(description.contains("SSIDs"), "{name}: {description}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn every_tool_has_an_output_schema_for_the_shared_output_object() -> anyhow::Result<()> {
     let (_h, tools) = tools().await?;
     for tool in &tools {
@@ -333,8 +360,8 @@ async fn id_refresh_and_range_properties_have_the_documented_types() -> anyhow::
         for (property, maximum) in [
             ("limit", Some(100)),
             ("page_size", Some(100)),
-            ("granularity", None),
-            ("busy_threshold", None),
+            ("granularity", Some(4_294_967_295)),
+            ("busy_threshold", Some(4_294_967_295)),
         ] {
             if let Some(definition) = properties.get(property) {
                 assert_eq!(definition["type"], "integer", "{name}.{property}");

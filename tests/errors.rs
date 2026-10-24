@@ -2,13 +2,15 @@
 //! mocked HTTP response can provoke, the fixed texts (no URL, path, host or token ever reaches the
 //! client), the single GET retry, and the credential re-read and retry.
 //!
-//! Rows that need a state the mock cannot produce (timeouts, which would take 10 s, and future
-//! rusteero variants) are covered by the `errors.rs` unit tests.
+//! The one row the mock cannot produce is a future rusteero variant (the wildcard arm), which the
+//! `errors.rs` unit tests cover. The timeout row takes about 22 s of real time and does not pause
+//! the clock: rusteero runs its timers on tokio's, and a paused clock auto-advances past them.
 
 mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use common::{Harness, TEST_TOKEN, authed_get, authed_get_as, fixture, json_response, json_status};
 use eero_mcp::Resolver;
@@ -378,6 +380,30 @@ async fn a_2xx_body_that_is_not_a_json_object_is_an_upstream_error() -> anyhow::
 }
 
 #[tokio::test]
+async fn a_2xx_body_that_is_not_utf8_or_is_over_the_size_cap_is_an_upstream_error()
+-> anyhow::Result<()> {
+    /// rusteero's `MAX_RESPONSE_BYTES` (10 MiB) plus one byte.
+    const OVER_THE_CAP: usize = 10 * 1024 * 1024 + 1;
+
+    for (label, body) in [
+        ("not utf-8", vec![0xff, 0xfe, 0xfd]),
+        ("over the size cap", vec![b' '; OVER_THE_CAP]),
+    ] {
+        let h = Harness::start().await?;
+        mount(&h, ResponseTemplate::new(200).set_body_bytes(body), 1).await;
+        let error = failure(&h).await?;
+        assert_eq!(error["code"], "upstream_error", "{label}");
+        assert_eq!(error["upstream_status"], 200, "{label}");
+        assert_eq!(
+            error["message"], "The eero cloud API returned an unexpected response.",
+            "{label}"
+        );
+        assert_clean(&error);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_empty_2xx_body_is_an_empty_envelope_not_an_error() -> anyhow::Result<()> {
     // rusteero treats an empty or whitespace-only 2xx body (and a 204) as an empty envelope.
     for template in [
@@ -390,6 +416,32 @@ async fn an_empty_2xx_body_is_an_empty_envelope_not_an_error() -> anyhow::Result
         assert_eq!(out["data"], Value::Null);
         assert_eq!(out["network_id"], "network-0001");
     }
+    Ok(())
+}
+
+// ===================== timeout =====================
+
+#[tokio::test]
+async fn a_response_slower_than_the_read_timeout_is_timeout() -> anyhow::Result<()> {
+    let h = Harness::start().await?;
+    // rusteero gives a response 10 s to start. Two requests: the single GET retry also times
+    // out. About 22 s of real time.
+    mount(
+        &h,
+        json_response(&fixture("account", "guest_network")).set_delay(Duration::from_secs(11)),
+        2,
+    )
+    .await;
+
+    let error = failure(&h).await?;
+
+    assert_eq!(error["code"], "timeout");
+    assert_eq!(
+        error["message"],
+        "The eero cloud API did not answer in time."
+    );
+    assert!(error.get("upstream_status").is_none());
+    assert_clean(&error);
     Ok(())
 }
 
@@ -500,6 +552,27 @@ async fn the_same_token_after_a_401_is_authentication_required_without_a_retry()
 
     assert_eq!(error["code"], "authentication_required");
     assert_eq!(error["upstream_status"], 401);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_clean(&error);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_found_by_the_reread_is_never_reported_as_missing() -> anyhow::Result<()> {
+    // The sources hold the token that just failed, and the 401 carries no eero error code.
+    let (resolver, reads) = counting_resolver(Some(TEST_TOKEN));
+    let h = Harness::start_with(resolver).await?;
+    mount(&h, ResponseTemplate::new(401), 1).await;
+
+    let error = failure(&h).await?;
+
+    assert_eq!(error["code"], "authentication_required");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("has expired, is invalid or was revoked"),
+        "{message}"
+    );
+    assert!(!message.contains("No eero credential"), "{message}");
     assert_eq!(reads.load(Ordering::SeqCst), 1);
     assert_clean(&error);
     Ok(())

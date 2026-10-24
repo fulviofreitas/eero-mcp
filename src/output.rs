@@ -102,7 +102,8 @@ pub struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "DetailMode", transform = drop_default)]
     detail: Option<DetailMode>,
-    /// The number of devices returned. Present on list_devices.
+    /// The number of devices returned. Present on list_devices, except when eero sent data with no
+    /// device list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "u64", transform = non_negative)]
     count: Option<u64>,
@@ -186,6 +187,15 @@ impl ToolOutput {
     pub fn with_detail(mut self, detail: DetailMode, count: usize) -> Self {
         self.detail = Some(detail);
         self.count = Some(u64::try_from(count).unwrap_or(u64::MAX));
+        self
+    }
+
+    /// Records the detail mode without a count, for data that holds no recognisable device list
+    /// (a count of 0 would claim the network has no devices).
+    #[must_use]
+    pub fn with_detail_only(mut self, detail: DetailMode) -> Self {
+        self.detail = Some(detail);
+        self.count = None;
         self
     }
 }

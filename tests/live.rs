@@ -7,8 +7,10 @@
 //! - Credentials come from the normal read-only resolution chain (the environment, the OS keyring,
 //!   a credential file), exactly as the binary resolves them.
 //! - Output is limited to result codes, sorted top-level key names and counts: never a body, never
-//!   an identifier. A failure is reported by its error code only, and a 200 is not asserted
-//!   (accounts without eero Plus legitimately get errors).
+//!   an identifier. A 200 is not required (accounts without eero Plus legitimately get errors),
+//!   but every result must be a well-formed success or one of the documented error codes
+//!   ([`DOCUMENTED_ERROR_CODES`]): a malformed result, `internal_error` and `credential_error` fail
+//!   the run, and the failure message lists tool names and codes only.
 //!
 //! ```text
 //! EERO_MCP_LIVE=1 cargo test --all-features --test live -- --ignored --nocapture
@@ -64,23 +66,57 @@ const LIVE_READS: &[&str] = &[
     "get_devices_insights",
 ];
 
+/// The error codes the tool contract documents for an upstream outcome. `internal_error` and
+/// `credential_error` are deliberately absent: they signal a defect, not an account state.
+const DOCUMENTED_ERROR_CODES: &[&str] = &[
+    "authentication_required",
+    "access_denied",
+    "not_found",
+    "premium_required",
+    "feature_unavailable",
+    "client_blocked",
+    "rate_limited",
+    "invalid_argument",
+    "timeout",
+    "network_error",
+    "upstream_error",
+];
+
 fn live_enabled() -> bool {
     std::env::var("EERO_MCP_LIVE").is_ok_and(|value| value == "1")
 }
 
-/// What may be printed about a result: no body, no identifier.
-fn describe(result: &rmcp::model::CallToolResult) -> String {
+/// What a live result comes to: the line that may be printed (no body, no identifier) and, when
+/// the result breaks the contract, what is wrong with it (a code or a fixed phrase, never content).
+struct Outcome {
+    printed: String,
+    problem: Option<String>,
+}
+
+fn describe(result: &rmcp::model::CallToolResult) -> Outcome {
     if result.is_error == Some(true) {
         let code = common::error_json(result)
             .ok()
-            .and_then(|value| value["error"]["code"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| "unrecognised".to_owned());
-        return format!("error code={code}");
+            .and_then(|value| value["error"]["code"].as_str().map(str::to_owned));
+        return match code {
+            None => Outcome {
+                printed: "error code=unrecognised".to_owned(),
+                problem: Some("error result with no recognisable code".to_owned()),
+            },
+            Some(code) => Outcome {
+                problem: (!DOCUMENTED_ERROR_CODES.contains(&code.as_str()))
+                    .then(|| format!("undocumented error code {code}")),
+                printed: format!("error code={code}"),
+            },
+        };
     }
     let Ok(value) = common::structured(result) else {
-        return "ok (unparsable result)".to_owned();
+        return Outcome {
+            printed: "ok (unparsable result)".to_owned(),
+            problem: Some("success result that is not well formed".to_owned()),
+        };
     };
-    match &value["data"] {
+    let printed = match &value["data"] {
         Value::Object(map) => {
             let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
             keys.sort_unstable();
@@ -89,6 +125,10 @@ fn describe(result: &rmcp::model::CallToolResult) -> String {
         Value::Array(items) => format!("ok count={}", items.len()),
         Value::Null => "ok data=null".to_owned(),
         _ => "ok data=scalar".to_owned(),
+    };
+    Outcome {
+        printed,
+        problem: None,
     }
 }
 
@@ -117,13 +157,54 @@ async fn live_read_only_sweep() -> anyhow::Result<()> {
     });
     let client = ().serve(client_io).await?;
 
+    let mut problems = Vec::new();
     for tool in LIVE_READS {
         let result = client
             .call_tool(CallToolRequestParams::new(*tool).with_arguments(object!({})))
             .await?;
-        println!("{tool}: {}", describe(&result));
+        let outcome = describe(&result);
+        println!("{tool}: {}", outcome.printed);
+        if let Some(problem) = outcome.problem {
+            problems.push(format!("{tool}: {problem}"));
+        }
     }
+    assert!(
+        problems.is_empty(),
+        "live results that break the contract:\n  {}",
+        problems.join("\n  ")
+    );
     Ok(())
+}
+
+/// Runs in every `cargo test`: the documented set is the server's error codes minus the two that
+/// signal a defect, so a new code cannot be added without deciding whether a live run accepts it.
+#[test]
+fn the_documented_error_codes_are_the_servers_codes_minus_the_defect_codes() {
+    use eero_mcp::errors::ErrorCode::{
+        AccessDenied, AuthenticationRequired, ClientBlocked, CredentialError, FeatureUnavailable,
+        InternalError, InvalidArgument, NetworkError, NotFound, PremiumRequired, RateLimited,
+        Timeout, UpstreamError,
+    };
+    let documented: Vec<&str> = [
+        AuthenticationRequired,
+        AccessDenied,
+        NotFound,
+        PremiumRequired,
+        FeatureUnavailable,
+        ClientBlocked,
+        RateLimited,
+        InvalidArgument,
+        Timeout,
+        NetworkError,
+        UpstreamError,
+    ]
+    .iter()
+    .map(|code| code.as_str())
+    .collect();
+    assert_eq!(documented, DOCUMENTED_ERROR_CODES);
+    for defect in [InternalError, CredentialError] {
+        assert!(!DOCUMENTED_ERROR_CODES.contains(&defect.as_str()));
+    }
 }
 
 /// Runs in every `cargo test`: the allowlist names real tools, so a rename cannot leave a stale

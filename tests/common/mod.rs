@@ -262,6 +262,31 @@ impl Harness {
         structured(&self.call(tool, args).await?)
     }
 
+    /// As [`Harness::call_ok`], and additionally requires that none of `secrets` appears anywhere
+    /// in the result: neither in `structuredContent` nor in the text block.
+    pub async fn call_ok_hiding(
+        &self,
+        tool: &str,
+        args: JsonObject,
+        secrets: &[&str],
+    ) -> anyhow::Result<Value> {
+        let result = self.call(tool, args).await?;
+        let value = structured(&result)?;
+        let text = result.content[0]
+            .as_text()
+            .context("content block is not text")?
+            .text
+            .clone();
+        let structured_text = value.to_string();
+        for (index, secret) in secrets.iter().enumerate() {
+            anyhow::ensure!(
+                !text.contains(secret) && !structured_text.contains(secret),
+                "{tool}: secret #{index} reached the output"
+            );
+        }
+        Ok(value)
+    }
+
     /// Calls a tool that must fail in-band and returns the parsed `{"error": {...}}` object.
     pub async fn call_err(&self, tool: &str, args: JsonObject) -> anyhow::Result<Value> {
         error_json(&self.call(tool, args).await?)
@@ -371,6 +396,12 @@ pub fn structured(result: &CallToolResult) -> anyhow::Result<Value> {
     anyhow::ensure!(
         serde_json::from_str::<Value>(&text.text)? == value,
         "the text block must mirror structuredContent"
+    );
+    // The object is sent twice, so the text copy must be compact JSON, not pretty-printed.
+    let compact = value.to_string();
+    anyhow::ensure!(
+        !text.text.contains('\n') && text.text == compact,
+        "the text block must be compact JSON"
     );
     Ok(value)
 }

@@ -16,17 +16,19 @@ use serde_json::Value;
 pub const REDACTED: &str = "[REDACTED]";
 
 /// The closed deny-list of secret-bearing keys, compared case-insensitively and exactly.
-pub const DENY_LIST: [&str; 25] = [
+pub const DENY_LIST: [&str; 26] = [
     // Wi-Fi and guest credentials.
     "password",
     "passphrase",
     "psk",
     "pre_shared_key",
     "wpa_key",
-    // Thread network credentials (network_key can also name a Wi-Fi key).
+    // Thread network credentials (network_key can also name a Wi-Fi key). The active operational
+    // dataset is hex TLV that embeds the master key and the PSKc.
     "network_key",
     "pskc",
     "master_key",
+    "active_operational_dataset",
     // Generic key material.
     "private_key",
     "secret",
@@ -98,12 +100,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_deny_list_is_the_closed_set_of_25() {
-        assert_eq!(DENY_LIST.len(), 25);
+    fn the_deny_list_is_the_closed_set_of_26() {
+        assert_eq!(DENY_LIST.len(), 26);
         let mut sorted = DENY_LIST.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 25, "no duplicates");
+        assert_eq!(sorted.len(), 26, "no duplicates");
         for key in DENY_LIST {
             assert_eq!(key, key.to_ascii_lowercase(), "entries are lower case");
         }

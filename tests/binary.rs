@@ -470,19 +470,92 @@ async fn a_termination_signal_ends_the_server_with_status_zero() -> anyhow::Resu
     let mock = mock_cloud().await;
     let origin = mock.uri();
 
-    let status = tokio::task::spawn_blocking(move || {
-        let mut session = Session::start(&origin, None);
-        session.handshake();
-        // The server is serving; ask it to stop the way a host or a supervisor would.
-        let signalled = Command::new("kill")
-            .args(["-TERM", &session.child.id().to_string()])
-            .status()
-            .expect("kill is available");
-        assert!(signalled.success());
-        session.wait()
+    let statuses = tokio::task::spawn_blocking(move || {
+        // Signal right after the handshake, several times: the handlers must already be installed
+        // when the InitializeResult is written, not merely soon after.
+        (0..5)
+            .map(|_| {
+                let mut session = Session::start(&origin, None);
+                session.handshake();
+                // The server is serving; ask it to stop the way a host or a supervisor would.
+                terminate(session.child.id());
+                session.wait()
+            })
+            .collect::<Vec<_>>()
     })
     .await?;
 
-    assert!(status.success(), "{status:?}");
+    for status in statuses {
+        assert!(status.success(), "{status:?}");
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) {
+    let signalled = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill is available");
+    assert!(signalled.success());
+}
+
+/// Kills the child when the test ends, however it ends.
+#[cfg(unix)]
+struct KillOnDrop(Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_termination_signal_before_the_handshake_ends_the_server_with_status_zero() {
+    // No token, and the sandbox holds no credential file: once the server has installed its
+    // signal handlers and read its configuration it warns about the missing credential. That
+    // line is the sign that a signal is now handled, and the server is still waiting for the
+    // host's initialize request.
+    let mut child = KillOnDrop(
+        command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary starts"),
+    );
+    let _stdin = child.0.stdin.take();
+    let stderr = child.0.stderr.take().expect("stderr is piped");
+    let (sender, lines) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let started = Instant::now();
+    loop {
+        let line = lines
+            .recv_timeout(TIMEOUT.saturating_sub(started.elapsed()))
+            .expect("the server warns that it has no credential");
+        if line.contains("no eero credential found") {
+            break;
+        }
+    }
+
+    terminate(child.0.id());
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(started.elapsed() < TIMEOUT, "the process did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{status:?}");
 }
