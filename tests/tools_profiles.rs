@@ -122,6 +122,27 @@ async fn the_descriptions_state_the_eero_plus_gating_of_the_blocked_apps_tool() 
 }
 
 #[tokio::test]
+async fn the_schedules_description_says_eero_refusals_are_expected_answers() -> anyhow::Result<()> {
+    let h = Harness::start().await?;
+    let tools = h.client.list_all_tools().await?;
+
+    let description = tool(&tools, "list_profile_schedules")
+        .description
+        .as_deref()
+        .unwrap_or_default();
+    for needle in [
+        "refuses this read",
+        "access_denied",
+        "not_found",
+        "do not retry",
+    ] {
+        assert!(description.contains(needle), "{needle}: {description}");
+    }
+    assert!(!description.contains('`'), "{description}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_is_offered_only_by_the_two_cached_profile_tools() -> anyhow::Result<()> {
     let h = Harness::start().await?;
     let tools = h.client.list_all_tools().await?;

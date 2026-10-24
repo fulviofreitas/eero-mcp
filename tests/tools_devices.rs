@@ -1568,7 +1568,14 @@ async fn the_description_of_get_transfer_stats_states_the_403_nuance() -> anyhow
         .as_deref()
         .unwrap_or_default()
         .to_owned();
-    for needle in ["403", "access_denied", "premium_required", "upstream_error"] {
+    for needle in [
+        "403",
+        "access_denied",
+        "premium_required",
+        "upstream_error",
+        "not_found",
+        "do not retry",
+    ] {
         assert!(description.contains(needle), "{needle}: {description}");
     }
     Ok(())

@@ -187,6 +187,10 @@ async fn every_tool_is_annotated_read_only_with_a_title_and_a_description() -> a
             !description.contains("\n\n\n") && description == description.trim(),
             "{name}: tidy description"
         );
+        assert!(
+            !description.contains('`'),
+            "{name}: descriptions are published to agents as plain text, no backticks"
+        );
     }
     Ok(())
 }
@@ -257,7 +261,63 @@ async fn every_tool_has_an_output_schema_for_the_shared_output_object() -> anyho
                 !schema.get("type").is_some_and(Value::is_array),
                 "{path}: type array"
             );
+            // No untyped node (the Inspector's untyped-schema rule): apart from a pure anyOf/oneOf
+            // container, whose branches are checked as nodes of their own, every schema publishes
+            // exactly one string type.
+            let container = ["anyOf", "oneOf"].iter().any(|union| {
+                schema
+                    .get(*union)
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| !branches.is_empty())
+            });
+            if container {
+                assert!(
+                    !schema.contains_key("type"),
+                    "{path}: a union container carries no type of its own"
+                );
+            } else {
+                assert!(
+                    schema.get("type").is_some_and(Value::is_string),
+                    "{path}: untyped schema; publish exactly one string type"
+                );
+            }
         });
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_data_member_is_published_as_single_typed_branches_for_every_json_kind()
+-> anyhow::Result<()> {
+    // data carries whatever eero sent: objects and lists, and also null (a response without a data
+    // member) or a scalar. The published schema must keep all of them valid without a type array.
+    let (_h, tools) = tools().await?;
+    for tool in &tools {
+        let name = &tool.name;
+        let output = schema_value(tool.output_schema.as_ref().expect("outputSchema"));
+        let data = &output["properties"]["data"];
+        assert!(
+            data.get("type").is_none(),
+            "{name}: type array or type on data"
+        );
+        let types: Vec<&str> = data["anyOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: data is an anyOf"))
+            .iter()
+            .map(|branch| {
+                branch["type"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name}: a data branch has one string type"))
+            })
+            .collect();
+        for kind in ["object", "array", "string", "number", "boolean", "null"] {
+            assert!(types.contains(&kind), "{name}: data does not allow {kind}");
+        }
+        assert_eq!(types.len(), 6, "{name}: {types:?}");
+        assert!(
+            data["description"].as_str().is_some_and(|d| d.len() >= 10),
+            "{name}: data is described"
+        );
     }
     Ok(())
 }

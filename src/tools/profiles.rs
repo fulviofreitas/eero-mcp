@@ -140,7 +140,9 @@ impl EeroMcp {
             "List the scheduled pauses of one household profile (for example bedtime): each ",
             "schedule's name, days, start and end times and whether it is enabled. Use it to ",
             "answer when a profile's internet is paused. profile_id is required (find it with ",
-            "list_profiles). network_id defaults to the account's only network."
+            "list_profiles). network_id defaults to the account's only network. eero refuses ",
+            "this read for some profiles and accounts: access_denied and not_found are ",
+            "expected answers, not faults, so do not retry."
         ),
         annotations(
             title = "List profile schedules",

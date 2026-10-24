@@ -433,9 +433,17 @@ npx -y @modelcontextprotocol/inspector@2.12.0 --cli -q --format json \
 ```
 
 Exit codes: 0 success, 5 an `isError` result or an unknown tool, 1 a JSON-RPC error, 6 a `--strict`
-error. Pass ids with `--tool-args-json`: the `--tool-arg key=value` form turns numeric-looking ids
-into numbers. Against a real session the output contains your real network data; do not paste or
-commit it.
+error. With `--strict`, a catalogue with no portability findings prints no report at all. Pass ids
+with `--tool-args-json`: the `--tool-arg key=value` form turns numeric-looking ids into numbers.
+Against a real session the output contains your real network data; do not paste or commit it.
+
+> **Keep real tokens off the command line.** When the Inspector is started through `npx`,
+> npm echoes the full command line on stderr (`npm notice run ...`), including any
+> `-e RUSTEERO_SESSION_TOKEN=<token>` argument, and the shell history and process list hold it too.
+> The `test-token` above is a placeholder for a local mock API. Against a real account, prefer
+> `-e EERO_MCP_SESSION_FILE=/path/to/copy` (an absolute path to a copy of the credential record),
+> or set the token in the MCP host's own `env` configuration, and never paste a real token into a
+> command line whose output is shared or logged.
 
 ## Development
 

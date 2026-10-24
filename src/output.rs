@@ -7,7 +7,7 @@
 
 use rusteero::Envelope;
 use rusteero::util::id_from_url;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -71,6 +71,25 @@ impl WindowEcho {
     }
 }
 
+/// A schemars field transform for a member that holds whatever JSON eero sent: any of the six JSON
+/// value kinds. A bare description would accept anything but constrains nothing, which schema
+/// linters flag as untyped, and a `type` array is less portable, so the schema is an `anyOf` of
+/// six single-typed branches. `number` covers integers, and `null` stays valid because a response
+/// without a `data` member is carried as null.
+fn any_json_value(schema: &mut Schema) {
+    schema.insert(
+        "anyOf".to_owned(),
+        serde_json::json!([
+            {"type": "object"},
+            {"type": "array"},
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "null"}
+        ]),
+    );
+}
+
 /// The success object every tool returns.
 // The fields are private on purpose (a plain comment: a doc comment here would be published in the
 // output schema): the only way to build one is through the constructors, which always redact
@@ -82,8 +101,10 @@ impl WindowEcho {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ToolOutput {
     /// What eero returned, exactly as eero sent it, with secret values (Wi-Fi and guest
-    /// passwords, keys, tokens) replaced by "[REDACTED]". list_networks returns the unwrapped
-    /// list of network entries; list_devices in summary mode returns the projected device list.
+    /// passwords, keys, tokens) replaced by "[REDACTED]". It is usually an object or a list, and
+    /// null when eero sent no data. list_networks returns the unwrapped list of network entries;
+    /// list_devices in summary mode returns the projected device list.
+    #[schemars(transform = any_json_value)]
     data: Value,
     /// The network that was queried, as a bare id. Present on network-scoped tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,7 +448,13 @@ mod tests {
         assert_eq!(schema["required"], json!(["data"]));
         let text = schema.to_string();
         assert!(!text.contains("\"default\""), "{text}");
-        assert!(!text.contains("\"null\""), "{text}");
+        // The only null in the schema is the data member's null branch.
+        let mut without_data = schema.clone();
+        without_data["properties"]
+            .as_object_mut()
+            .expect("properties")
+            .remove("data");
+        assert!(!without_data.to_string().contains("\"null\""), "{text}");
         let properties = schema["properties"].as_object().expect("properties");
         let mut names: Vec<_> = properties.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -454,6 +481,53 @@ mod tests {
         );
         assert_eq!(properties["window"]["type"], "object");
         assert_eq!(properties["detail"]["type"], "string");
+    }
+
+    #[test]
+    fn the_data_schema_is_an_any_of_single_typed_branches_covering_every_json_kind() {
+        let schema = Value::Object((*schema_for_output::<ToolOutput>()).clone());
+        let data = &schema["properties"]["data"];
+        assert!(data.get("type").is_none(), "no type array on data: {data}");
+        let types: Vec<&str> = data["anyOf"]
+            .as_array()
+            .expect("anyOf")
+            .iter()
+            .map(|branch| {
+                assert_eq!(
+                    branch.as_object().map(serde_json::Map::len),
+                    Some(1),
+                    "a branch is only a type: {branch}"
+                );
+                branch["type"].as_str().expect("one string type")
+            })
+            .collect();
+        assert_eq!(
+            types,
+            ["object", "array", "string", "number", "boolean", "null"]
+        );
+        // Every kind of value the server can put in data has a branch: eero's payloads are objects
+        // and lists, and a response with no data member (or a scalar) is carried as it came.
+        for value in [
+            json!({"name": "Example-Network"}),
+            json!([{"id": "n1"}]),
+            json!("text"),
+            json!(7),
+            json!(0.5),
+            json!(true),
+            Value::Null,
+        ] {
+            let kind = match &value {
+                Value::Object(_) => "object",
+                Value::Array(_) => "array",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_) => "boolean",
+                Value::Null => "null",
+            };
+            assert!(types.contains(&kind), "{value} has no branch");
+            let out = ToolOutput::from_value(&value);
+            assert_eq!(out.data(), &value);
+        }
     }
 
     // ===================== list unwrapping =====================

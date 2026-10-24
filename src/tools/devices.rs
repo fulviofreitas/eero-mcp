@@ -249,8 +249,9 @@ impl EeroMcp {
             "network's devices); omit device_id for the network-wide figures. Some accounts get ",
             "a 403 from eero for this read: access_denied when eero says the account lacks ",
             "permission, premium_required when eero points to a missing subscription, and ",
-            "otherwise upstream_error with upstream_status 403. network_id defaults to the ",
-            "account's only network. Secret values are redacted."
+            "otherwise upstream_error with upstream_status 403. access_denied and not_found are ",
+            "expected answers where eero refuses this read, not faults, so do not retry. ",
+            "network_id defaults to the account's only network. Secret values are redacted."
         ),
         annotations(
             title = "Get transfer stats",
