@@ -1,0 +1,9 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:30Z" },
+  "data": {
+    "members": [
+      { "url": "/2.2/users/user-0001", "role": "owner", "email": "user@example.com" },
+      { "url": "/2.2/users/user-0002", "role": "admin", "email": "admin@example.com" }
+    ]
+  }
+}

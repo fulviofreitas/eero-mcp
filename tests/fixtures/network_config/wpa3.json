@@ -1,0 +1,8 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:01:16Z" },
+  "data": {
+    "band_2_4_ghz": "WPA2_WPA3",
+    "band_5_ghz": "WPA3",
+    "band_6_ghz": "WPA3"
+  }
+}

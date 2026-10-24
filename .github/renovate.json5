@@ -1,0 +1,142 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Base configuration
+  extends: ["config:recommended", ":semanticCommits", "helpers:pinGitHubActionDigests"],
+
+  // Timezone for scheduling (used for prCreation hours if needed)
+  timezone: "America/Los_Angeles",
+
+  // IMPORTANT: Explicitly set empty schedule to create PRs immediately
+  // Without this, config:recommended applies a default schedule
+  schedule: ["at any time"],
+
+  // PR limits to avoid noise
+  // Note: Set to 0 to disable rate limiting
+  prHourlyLimit: 0,
+  prConcurrentLimit: 0,
+
+  // Branch naming
+  branchPrefix: "deps/",
+
+  // ============================================================================
+  // Commit Message Format (PR title is derived from commit message)
+  // ============================================================================
+  // The PR title is automatically derived from the commit message.
+  // Both must follow conventional commits format for commitlint to pass.
+  commitMessagePrefix: "chore(deps):",
+  commitMessageAction: "update",
+  commitMessageTopic: "{{{depName}}}",
+  commitMessageExtra: "to {{{newVersion}}}",
+
+  // Prevent long release notes in commit body (avoids commitlint failures)
+  commitBody: "",
+  commitBodyTable: false,
+
+  // Labels for all PRs
+  labels: ["dependencies", "renovate", "automerge"],
+
+  // Create a dependency dashboard issue
+  dependencyDashboard: true,
+  dependencyDashboardTitle: "📦 Renovate Dependency Dashboard",
+
+  // Close the Dependency Dashboard issue if there are no more updates
+  dependencyDashboardAutoclose: true,
+
+  // Dependency dashboard approval for certain updates
+  dependencyDashboardApproval: false,
+
+  // Allow recreating PRs that were closed without merging
+  // This ensures PRs can be recreated after branch deletion or config changes
+  recreateWhen: "auto",
+
+  // PR body template with useful information
+  prBodyTemplate: "{{{header}}}{{{table}}}{{{warnings}}}{{{notes}}}{{{changelogs}}}{{{controls}}}{{{footer}}}",
+
+  // Include release notes in PRs
+  fetchChangeLogs: "pr",
+
+  // Keep Cargo.lock in sync (binary crate: the lockfile is committed and CI builds with --locked)
+  lockFileMaintenance: { enabled: true, automerge: true, commitMessagePrefix: "chore(deps-cargo):" },
+
+  // Package-specific rules
+  packageRules: [
+    // ==========================================================================
+    // 🦀 Cargo dependencies: Group minor/patch updates
+    // ==========================================================================
+    {
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "cargo-minor-patch",
+      description: "Cargo minor/patch updates (auto-merge)",
+      automerge: true,
+      automergeType: "pr",
+      automergeStrategy: "squash",
+      commitMessagePrefix: "chore(deps-cargo):",
+      commitMessageTopic: "cargo dependencies",
+    },
+
+    // ==========================================================================
+    // 🟢 GitHub Actions: Auto-merge minor/patch updates
+    // ==========================================================================
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "github-actions",
+      description: "GitHub Actions minor/patch updates (auto-merge)",
+      automerge: true,
+      automergeType: "pr",
+      automergeStrategy: "squash",
+      commitMessagePrefix: "chore(deps-actions):",
+      commitMessageTopic: "github actions",
+    },
+
+    // ==========================================================================
+    // 🔵 Major updates: Never auto-merge, require review
+    // ==========================================================================
+    {
+      matchUpdateTypes: ["major"],
+      description: "Major updates require manual review",
+      automerge: false,
+      addLabels: ["major-update", "needs-review"],
+      reviewers: ["fulviofreitas"],
+      commitMessagePrefix: "chore(deps-major):",
+    },
+
+    // ==========================================================================
+    // 🦀 rusteero (git tag dependency): never auto-merge, always reviewed by hand
+    // ==========================================================================
+    // rusteero 3.x is not on crates.io, so Cargo.toml pins it to a release tag
+    // (`git` + `tag`) with a matching `version` requirement next to it. A bump
+    // changes the whole eero API surface this server wraps, and the `tag` and
+    // `version` fields must move together. This rule comes after the generic
+    // cargo and major rules so that it wins over them.
+    {
+      matchManagers: ["cargo"],
+      matchPackageNames: ["rusteero", "https://github.com/fulviofreitas/rusteero"],
+      description: "rusteero git tag bumps are reviewed by hand (never auto-merged)",
+      groupName: null,
+      automerge: false,
+      labels: ["dependencies", "renovate", "needs-review"],
+      reviewers: ["fulviofreitas"],
+      commitMessagePrefix: "chore(deps-rusteero):",
+      commitMessageTopic: "rusteero",
+    },
+
+    // ==========================================================================
+    // 🟣 Security updates: High priority, fast-track
+    // ==========================================================================
+    {
+      matchUpdateTypes: ["patch"],
+      prPriority: 20,
+      description: "Security patches get high priority",
+    },
+  ],
+
+  // Vulnerability alerts configuration (top-level, not inside packageRules)
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["security", "critical", "automerge"],
+    automerge: true,
+  },
+}

@@ -1,0 +1,19 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:30Z" },
+  "data": {
+    "start": "2026-10-16T00:00:00Z",
+    "end": "2026-10-23T00:00:00Z",
+    "limit": null,
+    "series": [
+      {
+        "insight_type": "blocked",
+        "insight_type_name": "Blocked",
+        "sum": 42,
+        "values": [
+          { "time": "2026-10-16T00:00:00Z", "value": 30 },
+          { "time": "2026-10-17T00:00:00Z", "value": 12 }
+        ]
+      }
+    ]
+  }
+}

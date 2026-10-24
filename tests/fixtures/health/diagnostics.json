@@ -1,0 +1,17 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:02Z" },
+  "data": {
+    "status": "complete",
+    "started_at": "2026-10-22T03:05:00Z",
+    "completed_at": "2026-10-22T03:05:41Z",
+    "results": [
+      { "test": "wan_connectivity", "status": "pass" },
+      { "test": "dns_resolution", "status": "pass" },
+      { "test": "gateway_latency", "status": "warn", "detail": "latency above the usual range" }
+    ],
+    "wan": {
+      "pppoe_enabled": true,
+      "pppoe_credentials": { "username": "user@example.com", "password": "pppoepass000" }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:40Z" },
+  "data": {
+    "device": {
+      "url": "/2.2/networks/network-0001/devices/aa:bb:cc:00:00:01",
+      "display_name": "Example Laptop",
+      "hostname": "example-laptop",
+      "manufacturer": "Example Corp"
+    },
+    "start": "2026-10-16T00:00:00Z",
+    "end": "2026-10-23T00:00:00Z",
+    "limit": null,
+    "series": [
+      {
+        "insight_type": "blocked",
+        "insight_type_name": "Blocked",
+        "sum": 30,
+        "values": [
+          { "time": "2026-10-16T00:00:00Z", "value": 20 },
+          { "time": "2026-10-17T00:00:00Z", "value": 10 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:40Z", "extra": "dropped" },
+  "data": {
+    "url": "/2.2/eeros/eero-0001",
+    "serial": "SN-EXAMPLE-0001",
+    "mac_address": "AA:BB:CC:00:01:01",
+    "model": "eero Example Pro",
+    "model_number": "EX-0001",
+    "os_version": "7.0.0-example",
+    "location": "Living Room",
+    "status": "green",
+    "state": "green",
+    "gateway": true,
+    "is_primary_node": true,
+    "wired": true,
+    "led_on": true,
+    "led_brightness": 100,
+    "ip_address": "192.0.2.11",
+    "mesh_quality_bars": 5,
+    "connected_clients_count": 3,
+    "connected_wired_clients_count": 1,
+    "connected_wireless_clients_count": 2,
+    "update_available": false,
+    "reboots": { "last_day": 0, "last_week": 1 },
+    "nightlight": { "enabled": false, "schedule": null },
+    "resources": {
+      "connections": "/2.2/eeros/eero-0001/connections"
+    },
+    "network": { "url": "/2.2/networks/network-0001", "name": "Example-Network" }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:35Z" },
+  "data": {
+    "start": "2026-10-16T00:00:00Z",
+    "end": "2026-10-23T00:00:00Z",
+    "insight_type": "blocked",
+    "insights": [
+      {
+        "insights_url": "/2.2/networks/network-0001/insights/devices/aa:bb:cc:00:00:01",
+        "display_name": "Example Laptop",
+        "hostname": "example-laptop",
+        "manufacturer": "Example Corp",
+        "device_type": "laptop_computer",
+        "connection_type": "wireless",
+        "is_private": false,
+        "sum": 30
+      },
+      {
+        "insights_url": "/2.2/networks/network-0001/insights/devices/aa:bb:cc:00:00:02",
+        "display_name": "Example Phone",
+        "hostname": "example-phone",
+        "manufacturer": "Example Corp",
+        "device_type": "phone",
+        "connection_type": "wireless",
+        "is_private": true,
+        "sum": 12
+      }
+    ]
+  }
+}

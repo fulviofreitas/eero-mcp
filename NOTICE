@@ -1,0 +1,19 @@
+eero-mcp - a read-only MCP server for the eero mesh Wi-Fi cloud API
+Copyright (c) 2026 Fulvio Freitas. Licensed under the MIT License (see LICENSE).
+
+Lineage and attribution
+-----------------------
+eero-mcp builds on rusteero by Fulvio Freitas (@fulviofreitas)
+  https://github.com/fulviofreitas/rusteero - MIT License, Copyright (c) 2026 Fulvio Freitas
+a Rust port of eero-api by the same author
+  https://github.com/fulviofreitas/eero-api - MIT License, Copyright (c) 2026 Fulvio Freitas
+which is itself a modern revamp of eero-client by @343max
+  https://github.com/343max/eero-client - MIT License
+
+eero-mcp also uses the official Rust MCP SDK (rmcp)
+  https://github.com/modelcontextprotocol/rust-sdk - Apache-2.0 License
+
+No source code from any of the above projects is included in eero-mcp. rusteero and rmcp are
+build dependencies; eero-api and eero-client are credited for lineage only.
+
+eero-mcp is an unofficial project, not affiliated with or endorsed by eero or Amazon.

@@ -1,0 +1,105 @@
+name: 🦀 Issue Report
+description: Tell us what's going wrong (or what you'd love to see)
+title: "[<TYPE>]: <short description>"
+# The "triage" label must exist in the repository (gh label create triage): GitHub silently
+# ignores labels that do not exist.
+labels: ["triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        👋 Hey, thanks for taking a moment to file this! Sorry you ran into something — the more you can share below, the faster we can help. No pressure to fill every field, just whatever you've got handy.
+
+        > 🔒 A quick heads up: please scrub anything that identifies your network before posting — session tokens, cookies, network / eero / device ids, MAC addresses, SSIDs, serial numbers, IP addresses and email addresses. Tool results and debug logs contain them.
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: 🏷️ What kind of issue is this?
+      options:
+        - 🐛 Bug — something works incorrectly
+        - 🔐 Authentication / login problem
+        - ❓ Question / how-to
+        - ✨ Feature request
+        - 📚 Documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 📍 Where did you run into it?
+      options:
+        - MCP tool (a tool's inputs, output or error)
+        - Credentials / session (token, keyring, credential file)
+        - stdio transport (startup, shutdown, protocol)
+        - MCP host configuration (Claude Code, Claude Desktop, Cursor, other)
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 💬 What happened? What did you expect?
+      placeholder: I asked for X, expected Y, but got Z instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 🔁 How can we reproduce it?
+      description: The tool name and the arguments you passed (ids scrubbed), or the host configuration entry you used (token removed), is perfect.
+      value: |
+        ```json
+        {
+          "tool": "",
+          "arguments": {}
+        }
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: ⚠️ Error result or log output
+      description: |
+        The tool's error result (it carries a stable `error.code`), or what the host's MCP log shows. For more detail, run the server with debug logs on stderr:
+        - `RUST_LOG=eero_mcp=debug,rusteero=debug`
+
+        Avoid a bare `RUST_LOG=debug`: it also logs every tool call's arguments and results. Debug logs contain request paths with ids, so scrub them first.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: versions
+    attributes:
+      label: 📦 Versions
+      description: '`eero-mcp --version`, the rusteero and rmcp versions from Cargo.lock if you built from source, `rustc --version`, and your MCP host with its version'
+      placeholder: eero-mcp 0.1.0, rusteero 3.0.0, rmcp 3.7.0, rustc 1.96.0, <MCP host and version>
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 💻 Operating system
+      options:
+        - 🍎 macOS
+        - 🐧 Linux
+        - 🪟 Windows / WSL
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 🎁 Anything else?
+      description: Workarounds you tried, related issues, screenshots — anything that might help.
+    validations:
+      required: false

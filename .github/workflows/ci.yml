@@ -1,0 +1,255 @@
+# ============================================================================
+# 🧪 Continuous Integration Pipeline
+# ============================================================================
+# Chain: Commit Lint → Format & Lint → [Test matrix ‖ Docs ‖ Supply chain ‖ MSRV] → CI Success
+#
+# The workflow name and every job name match rusteero's ci.yml; the workflow name, `📝 Commit Lint`
+# and `✅ CI Success` also match eero-api and eeroctl. Check names equal job names, and
+# `✅ CI Success` is the single check to require.
+#
+# Every cargo command that builds, checks, tests or documents runs with --locked, so CI never
+# silently re-resolves dependencies against a stale Cargo.lock.
+#
+# Pinning: every action is pinned to a full commit SHA. Renovate bumps the pins that carry a
+# `# vX.Y.Z` comment (helpers:pinGitHubActionDigests). The workflow-arsenal and
+# dtolnay/rust-toolchain pins follow their master branches, which Renovate cannot track: their
+# `# master @ <date>` comments record when they were pinned, and they are bumped by hand.
+# ============================================================================
+
+name: 🧪 CI Pipeline
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+  # Line tables keep panic locations readable at a fraction of the size of full debuginfo.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  # ============================================================================
+  # 1️⃣ Commit Lint (Gate 1)
+  # ============================================================================
+  commitlint:
+    name: 📝 Commit Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 📝 Validate commits
+        uses: fulviofreitas/workflow-arsenal/.github/actions/commitlint@c17dd34cd4f607a9d2760217b8445a20d18e1837 # master @ 2026-10-23
+        with:
+          from-sha: ${{ github.event.pull_request.base.sha }}
+          to-sha: ${{ github.event.pull_request.head.sha }}
+
+  # ============================================================================
+  # 2️⃣ Format & Lint (Gate 2)
+  # ============================================================================
+  lint:
+    name: 🧹 Format & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: commitlint
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🦀 Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: 💾 Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: 🎨 rustfmt
+        run: cargo fmt --all -- --check
+      - name: 🧹 clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: 🧹 clippy (no default features)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      # Without --all-targets: the library and the binary are built the way users get them, with
+      # only the normal dependencies' features. The steps above build test targets, whose
+      # dev-dependencies (tokio "full", rmcp "client") widen those features and could hide a
+      # missing one.
+      - name: 🔨 check shipped build (all features)
+        run: cargo check --locked --all-features
+      - name: 🔨 check shipped build (no default features)
+        run: cargo check --locked --no-default-features
+
+  # ============================================================================
+  # 3️⃣ Test matrix (Parallel)
+  # ============================================================================
+  test:
+    name: 🧪 Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🦀 Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: stable
+      - name: 💾 Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # tests/read_only_guard.rs runs `cargo metadata --locked --offline`, which needs every
+      # platform's package sources; a build or test run downloads only the host's.
+      - name: 📦 Fetch dependencies (all targets)
+        run: cargo fetch --locked
+      # The live tests are #[ignore]d and stay ignored here: they read the real eero cloud and
+      # run only by hand with EERO_MCP_LIVE=1.
+      - name: 🧪 cargo test (all features)
+        run: cargo test --locked --all-features
+      - name: 🧪 cargo test (no default features)
+        run: cargo test --locked --no-default-features
+
+  # ============================================================================
+  # 3️⃣ Docs (Parallel)
+  # ============================================================================
+  docs:
+    name: 📚 Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🦀 Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: stable
+      - name: 💾 Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: 📚 cargo doc
+        run: cargo doc --locked --no-deps --all-features
+
+  # ============================================================================
+  # 3️⃣ Supply chain (Parallel)
+  # ============================================================================
+  deny:
+    name: 🛡️ Supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🛡️ cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --locked --all-features
+
+  # ============================================================================
+  # 3️⃣ MSRV (Parallel) — rust-version in Cargo.toml
+  # ============================================================================
+  msrv:
+    name: 🧱 MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🔎 Read rust-version
+        id: msrv
+        run: |
+          version="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "rust-version not found in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: 🦀 Setup Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: 💾 Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The explicit +toolchain beats the repository's rust-toolchain.toml (channel = "stable"),
+      # which would otherwise silently replace the MSRV toolchain with stable.
+      - name: 🧱 cargo check on MSRV
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+${MSRV}" check --locked --all-features --all-targets
+
+  # ============================================================================
+  # 4️⃣ CI Success Gate
+  # ============================================================================
+  ci-success:
+    name: ✅ CI Success
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [commitlint, lint, test, docs, deny, msrv]
+    if: always()
+    steps:
+      - name: 🔍 Check all jobs passed
+        env:
+          COMMITLINT: ${{ needs.commitlint.result }}
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          DOCS: ${{ needs.docs.result }}
+          DENY: ${{ needs.deny.result }}
+          MSRV: ${{ needs.msrv.result }}
+        run: |
+          {
+            echo "## 🧪 CI Pipeline Summary"
+            echo ""
+            echo "| Stage | Job | Status |"
+            echo "|:------|:----|:-------|"
+            echo "| 1️⃣ | 📝 Commit Lint | ${COMMITLINT} |"
+            echo "| 2️⃣ | 🧹 Format & Lint | ${LINT} |"
+            echo "| 3️⃣ | 🧪 Tests | ${TEST} |"
+            echo "| 3️⃣ | 📚 Docs | ${DOCS} |"
+            echo "| 3️⃣ | 🛡️ Supply chain | ${DENY} |"
+            echo "| 3️⃣ | 🧱 MSRV | ${MSRV} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$COMMITLINT" == "success" && "$LINT" == "success" && "$TEST" == "success" \
+                && "$DOCS" == "success" && "$DENY" == "success" && "$MSRV" == "success" ]]; then
+            {
+              echo "> [!NOTE]"
+              echo "> ### ✅ All Required Checks Passed"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          else
+            {
+              echo "> [!CAUTION]"
+              echo "> ### ❌ Some Required Checks Failed"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

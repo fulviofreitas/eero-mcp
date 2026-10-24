@@ -1,0 +1,40 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:45Z", "extra": "dropped" },
+  "data": {
+    "node_actions": [],
+    "ports": {
+      "interfaces": [
+        {
+          "interface_number": 1,
+          "name": "WAN",
+          "network_type": "wan",
+          "ethernet_address": "AA:BB:CC:00:01:11",
+          "capable_protocols": ["data"],
+          "disabled_protocols": []
+        },
+        {
+          "interface_number": 2,
+          "name": "LAN",
+          "network_type": "lan",
+          "ethernet_address": "AA:BB:CC:00:01:12",
+          "capable_protocols": ["data"],
+          "disabled_protocols": []
+        }
+      ]
+    },
+    "wireless_devices": [
+      {
+        "url": "/2.2/networks/network-0001/devices/device-0001",
+        "mac": "aa:bb:cc:00:00:01",
+        "nickname": "Example Phone",
+        "ip": "192.0.2.101"
+      },
+      {
+        "url": "/2.2/networks/network-0001/devices/device-0003",
+        "mac": "aa:bb:cc:00:00:03",
+        "nickname": null,
+        "ip": "192.0.2.103"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:35Z" },
+  "data": {
+    "role": "owner",
+    "can_manage_network": true,
+    "can_manage_members": true
+  }
+}

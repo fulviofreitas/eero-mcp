@@ -1,0 +1,46 @@
+# cargo-deny configuration - https://embarkstudios.github.io/cargo-deny/
+[graph]
+# CI checks the full graph, keyring chain included. This setting applies even when the command
+# line also passes --no-default-features, which therefore does not narrow the graph.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# zbus 6.0.0 folded these crates into `zbus` itself, so the standalone crates are marked
+# unmaintained. They arrive only through `keyring` -> `zbus-secret-service-keyring-store` ->
+# `secret-service` -> `zbus` 5.x, and no release of that chain depends on zbus 6 yet, so there is
+# no upgrade to take. These are maintenance notices, not vulnerabilities; drop the entries once
+# `keyring` moves to zbus 6.
+ignore = [
+  { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# rusteero 3.x is not on crates.io: it is a git dependency pinned to a release tag.
+allow-git = ["https://github.com/fulviofreitas/rusteero"]
+required-git-spec = "tag"

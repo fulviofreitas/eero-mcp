@@ -1,0 +1,17 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:01:12Z" },
+  "data": [
+    {
+      "url": "/2.2/networks/network-0001/reservations/reservation-0001",
+      "mac": "aa:bb:cc:00:00:01",
+      "ip": "192.0.2.11",
+      "description": "Example server"
+    },
+    {
+      "url": "/2.2/networks/network-0001/reservations/reservation-0002",
+      "mac": "aa:bb:cc:00:00:02",
+      "ip": "192.0.2.12",
+      "description": "Example printer"
+    }
+  ]
+}

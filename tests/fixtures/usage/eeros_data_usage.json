@@ -1,0 +1,27 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:20Z" },
+  "data": {
+    "start": "2026-10-16T00:00:00Z",
+    "end": "2026-10-23T00:00:00Z",
+    "values": [
+      {
+        "id": "eero-0001",
+        "url": "/2.2/eeros/eero-0001",
+        "location": "Living Room",
+        "model_number": "EX-0001",
+        "serial": "SERIAL-0001",
+        "download": 2000000,
+        "upload": 200000
+      },
+      {
+        "id": "eero-0002",
+        "url": "/2.2/eeros/eero-0002",
+        "location": "Office",
+        "model_number": "EX-0001",
+        "serial": "SERIAL-0002",
+        "download": 1000000,
+        "upload": 100000
+      }
+    ]
+  }
+}

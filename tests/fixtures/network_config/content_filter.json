@@ -1,0 +1,18 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:01:20Z" },
+  "data": {
+    "allowed_list": [
+      { "domain_name": "homework.example.com", "applied_to_network": true }
+    ],
+    "blocked_list": [
+      { "domain_name": "ads.example.com", "applied_to_network": true },
+      {
+        "domain_name": "tracker.example.com",
+        "applied_to_network": false,
+        "profile_list": [
+          { "profile_name": "Kids", "profile_url": "/2.2/networks/network-0001/profiles/profile-0001" }
+        ]
+      }
+    ]
+  }
+}

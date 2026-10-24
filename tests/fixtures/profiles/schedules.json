@@ -1,0 +1,21 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:00:55Z" },
+  "data": [
+    {
+      "url": "/2.2/networks/network-0001/profiles/profile-0001/schedules/schedule-0001",
+      "name": "Bedtime",
+      "days": ["monday", "tuesday", "wednesday", "thursday", "sunday"],
+      "start": "21:00",
+      "end": "07:00",
+      "enabled": true
+    },
+    {
+      "url": "/2.2/networks/network-0001/profiles/profile-0001/schedules/schedule-0002",
+      "name": "Homework",
+      "days": ["wednesday"],
+      "start": "15:00",
+      "end": "16:00",
+      "enabled": false
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "meta": { "code": 200, "server_time": "2026-01-01T00:01:14Z" },
+  "data": {
+    "subnets": [
+      {
+        "subnet_id": "subnet-0001",
+        "subnet_type": "guest",
+        "name": "Example-Network Guest",
+        "enabled": true,
+        "open_network": false,
+        "password": "subnetpass000",
+        "wan_access": true,
+        "rate_limit_pct": 50,
+        "dedicated_subnet": {
+          "subnet_ip": "198.51.100.0",
+          "subnet_mask": "255.255.255.0",
+          "start_ip": "198.51.100.10",
+          "end_ip": "198.51.100.250"
+        }
+      },
+      {
+        "subnet_id": "subnet-0002",
+        "subnet_type": "iot",
+        "name": "Example-Network IoT",
+        "enabled": false,
+        "open_network": true,
+        "password": "",
+        "passphrase": null,
+        "wan_access": false
+      }
+    ]
+  }
+}

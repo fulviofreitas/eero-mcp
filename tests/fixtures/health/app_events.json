@@ -1,0 +1,19 @@
+{
+  "meta": { "code": 200, "server_time": "2026-10-23T12:00:06Z" },
+  "data": {
+    "events": [
+      {
+        "category": "device",
+        "description": "Example-Phone connected",
+        "hash": "event-hash-0001",
+        "timestamp_ms": "1790000100000"
+      },
+      {
+        "category": "eero",
+        "description": "Living Room went offline",
+        "hash": "event-hash-0002",
+        "timestamp_ms": "1790000000000"
+      }
+    ]
+  }
+}
