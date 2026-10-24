@@ -12,6 +12,7 @@
 //! All the work is in [`crate::auth`]; this module is the terminal front end: a [`Prompter`] that
 //! reads stdin, and the reports and exit statuses.
 
+use std::fmt;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
@@ -19,8 +20,9 @@ use rusteero::Error;
 use secrecy::SecretString;
 
 use crate::auth::{
-    Abort, CodeKind, LoginError, LogoutReport, NotChecked, OwnStore, Problem, Prompter, StoreKind,
-    revoke_session, run_login, save_session, sign_out_own_session,
+    Abort, CodeKind, LoginError, LogoutReport, NotChecked, OwnStore, Problem, Prompter,
+    ReplacedOutcome, StartBudget, StoreKind, revoke_replaced, revoke_session, run_login,
+    save_session, sign_out_own_session,
 };
 use crate::config::{EnvMap, Settings};
 use crate::credentials::{CredentialChain, Source, resolve_at_startup_resolved};
@@ -53,7 +55,11 @@ impl Command {
 }
 
 /// What reading one line of input came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A text line is what the user typed at a prompt: an identifier or a one-time code. Its `Debug`
+/// output is written by hand and shows the length only, so no `{:?}` or `?line` in a log line, a
+/// panic message or a failed assertion can print it.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Line {
     /// A line (without its line ending).
     Text(String),
@@ -61,6 +67,16 @@ pub enum Line {
     Invalid,
     /// The input ended.
     End,
+}
+
+impl fmt::Debug for Line {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => write!(f, "Text(<redacted, {} bytes>)", text.len()),
+            Self::Invalid => f.write_str("Invalid"),
+            Self::End => f.write_str("End"),
+        }
+    }
 }
 
 /// Reads one line from `reader`, holding at most `max` bytes of it: a longer line is read to its
@@ -209,6 +225,9 @@ fn login_failure_text(error: &LoginError) -> String {
         LoginError::RateLimited { retry_after_seconds: None } => {
             "eero rate-limited the login. Wait a while and try again.".to_owned()
         }
+        LoginError::StartBudgetExhausted { retry_after_seconds } => format!(
+            "This run has used up its login starts (3 in 15 minutes), so no further code was requested. Nothing was sent. Wait {retry_after_seconds} seconds and try again."
+        ),
         LoginError::Network => {
             "Could not reach the eero cloud API. Check the connection and try again.".to_owned()
         }
@@ -269,7 +288,18 @@ pub async fn run_login_command<S: LineSource>(
     }
 
     let mut prompter = TerminalPrompter::new(source);
-    let token = match run_login(settings.api_base_url.as_deref(), None, &mut prompter, None).await {
+    // One run is one process: the budget bounds the starts of this run (at most three by the
+    // attempt limit) and exists so that no caller of the driver can skip it.
+    let budget = StartBudget::standard();
+    let token = match run_login(
+        settings.api_base_url.as_deref(),
+        None,
+        &mut prompter,
+        None,
+        &budget,
+    )
+    .await
+    {
         Ok(token) => token,
         Err(error) => {
             eprintln!("eero-mcp: {}", login_failure_text(&error));
@@ -278,8 +308,8 @@ pub async fn run_login_command<S: LineSource>(
     };
 
     match save_session(&store, chain, &token).await {
-        Ok(kind) => {
-            match kind {
+        Ok(saved) => {
+            match saved.kind {
                 StoreKind::File => match store.file_path() {
                     Some(path) => {
                         println!("Logged in. The session is stored in {}.", path.display());
@@ -292,8 +322,8 @@ pub async fn run_login_command<S: LineSource>(
                     );
                 }
             }
-            let chain = Arc::clone(chain);
-            let higher = tokio::task::spawn_blocking(move || chain.higher_precedence_source())
+            let for_check = Arc::clone(chain);
+            let higher = tokio::task::spawn_blocking(move || for_check.higher_precedence_source())
                 .await
                 .ok()
                 .flatten();
@@ -305,6 +335,11 @@ pub async fn run_login_command<S: LineSource>(
                     "Note: EERO_MCP_SESSION_FILE holds a usable token and takes precedence over this login."
                 ),
                 _ => println!("A running eero-mcp server picks this session up without a restart."),
+            }
+            // Logging in again must end the session it replaced, not leave it live in no store.
+            if saved.replaced_count() > 0 {
+                let outcome = revoke_replaced(settings.api_base_url.as_deref(), chain, saved).await;
+                print_replaced_outcome(&outcome);
             }
             0
         }
@@ -321,6 +356,23 @@ pub async fn run_login_command<S: LineSource>(
             }
             1
         }
+    }
+}
+
+/// What signing out the replaced session came to, on stdout.
+fn print_replaced_outcome(outcome: &ReplacedOutcome) {
+    if outcome.revoked > 0 {
+        println!(
+            "The previous eero-mcp session was signed out: a sign-out request was sent to eero (its answer is not reported)."
+        );
+    }
+    if outcome.held_elsewhere > 0 {
+        println!(
+            "The previous eero-mcp session was not signed out at eero, because another credential source also holds it."
+        );
+    }
+    if outcome.not_sent > 0 {
+        println!("A sign-out request for the previous eero-mcp session could not be sent.");
     }
 }
 
@@ -534,6 +586,33 @@ mod tests {
     }
 
     #[test]
+    fn a_text_line_never_prints_what_the_user_typed() {
+        let line = Line::Text("123456".to_owned());
+        for shown in [format!("{line:?}"), format!("{line:#?}")] {
+            assert!(!shown.contains("123456"), "{shown}");
+            assert!(shown.contains("redacted"), "{shown}");
+        }
+        assert_eq!(
+            format!("{:?}", Line::Text("user@example.com".to_owned())),
+            "Text(<redacted, 16 bytes>)"
+        );
+        // Collections, assertions and logs print through Debug too.
+        let many = format!(
+            "{:?}",
+            vec![
+                Line::Text("user@example.com".to_owned()),
+                Line::Invalid,
+                Line::End
+            ]
+        );
+        assert!(!many.contains("example.com"), "{many}");
+        assert_eq!(
+            format!("{:?} {:?}", Line::Invalid, Line::End),
+            "Invalid End"
+        );
+    }
+
+    #[test]
     fn subcommand_words_parse_exactly() {
         assert_eq!(Command::parse("login"), Some(Command::Login));
         assert_eq!(Command::parse("logout"), Some(Command::Logout));
@@ -586,6 +665,13 @@ mod tests {
                 retry_after_seconds: Some(30)
             })
             .contains("30 seconds")
+        );
+        let budget = login_failure_text(&LoginError::StartBudgetExhausted {
+            retry_after_seconds: 42,
+        });
+        assert!(
+            budget.contains("42 seconds") && budget.contains("Nothing was sent"),
+            "{budget}"
         );
         for error in [
             LoginError::CodeRejected,

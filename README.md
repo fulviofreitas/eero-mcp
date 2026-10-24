@@ -123,6 +123,12 @@ login works, the session is saved to eero-mcp's own store and installed in the r
 once. If the host cannot show forms, the tool returns `login_requires_terminal` and sends nothing
 to eero: run `eero-mcp login` in a terminal instead.
 
+Every login start makes eero send you an email or SMS, so a server process allows 3 starts per 15
+minutes, counted across all `login` calls: a call that the host cancels or abandons keeps the starts
+it made. A wrong code that restarts the login uses another start. When the 3 are used up, `login`
+answers `rate_limited` with `retry_after_seconds` and sends nothing; wait, or run `eero-mcp login`
+in a terminal.
+
 > **A deliberate deviation from the MCP specification.** The MCP elicitation specification
 > (2025-11-25) says servers must not use form mode to ask for sensitive information such as
 > credentials, and must use URL mode instead. eero-mcp asks for the one-time code in a form anyway,
@@ -156,8 +162,11 @@ else in `$XDG_CONFIG_HOME/eero-mcp` (an absolute value only); else in `~/.config
 the same record that `eeroctl` and `eero-api` write, is created with mode `0600` in a directory the
 save creates with mode `0700` (Unix; Windows relies on the profile's access control), and is
 replaced atomically. A symbolic link at its path is replaced, never followed. A new login replaces
-the old record and removes a leftover copy in the other backend; it does not sign the earlier
-session out (run `eero-mcp logout` first for that).
+the old record and removes a leftover copy in the other backend, then signs the replaced session
+out at eero (one request, best effort; the login says so), so logging in again to rotate a session
+ends the old one. It skips the sign-out for a token that another source (the environment token, the
+explicit file, the shared keyring entry or eeroctl's file) also holds, because that would end that
+login too.
 
 `login` and `logout` refuse to run, before sending anything, when `EERO_MCP_SESSION_FILE` names
 eero-mcp's own session file: a login would overwrite, and a logout delete, a credential you
@@ -505,7 +514,7 @@ when they apply, `field`, `retry_after_seconds`, `upstream_status` and `upstream
 | `authentication_required` | No session, or it expired or was revoked | Call the `login` tool or run `eero-mcp login` (or log in with `eeroctl`); the new session is picked up automatically unless `RUSTEERO_SESSION_TOKEN` is set, in which case restart with a fresh token |
 | `premium_required` | The data needs eero Plus (or eero Secure) | Nothing to retry; the network has no such subscription |
 | `feature_unavailable` | The eero is offline, or its hardware or firmware lacks the feature | Check the node, or accept that the feature is unsupported |
-| `rate_limited` | eero is throttling requests | Wait `retry_after_seconds`; the server never retries rate limits |
+| `rate_limited` | eero is throttling requests; or, for `login` only, this server has used up its 3 login starts per 15 minutes (nothing was sent) | Wait `retry_after_seconds`; the server never retries rate limits |
 | `not_found` | Resource missing, no networks on the account, or not supported on this network or firmware | Check the id; some endpoints answer 404 on some firmware |
 | `access_denied` | The signed-in account lacks permission | Not a session problem; use an account with the right role |
 | `client_blocked` | eero rejected this client version | Update eero-mcp |

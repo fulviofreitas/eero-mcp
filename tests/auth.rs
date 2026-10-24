@@ -25,8 +25,8 @@ use common::{
     targets_of,
 };
 use eero_mcp::auth::{
-    Abort, CodeKind, LoginError, NotChecked, OwnStore, Problem, Prompter, SaveError, StoreKind,
-    revoke_session, run_login, save_session, sign_out_own_session,
+    Abort, CodeKind, LoginError, NotChecked, OwnStore, Problem, Prompter, SaveError, StartBudget,
+    StoreKind, revoke_replaced, revoke_session, run_login, save_session, sign_out_own_session,
 };
 use eero_mcp::cli::{self, Line, LineSource};
 use eero_mcp::config::{EnvMap, Settings};
@@ -221,6 +221,7 @@ async fn login(
         identifier.map(token),
         script,
         Some(&permits),
+        &StartBudget::standard(),
     )
     .await
     .map(|token| token.expose_secret().to_owned())
@@ -520,9 +521,9 @@ async fn a_wrong_expired_unlabelled_or_malformed_code_all_restart_the_login() ->
 
 #[tokio::test]
 async fn a_refused_verification_ends_the_login_after_one_start() -> anyhow::Result<()> {
-    // The rest of eero's verification group, and a re-wrapped API error: a new start would send
-    // the user another message, so none is made.
-    let refusals: [(u16, Option<&str>); 9] = [
+    // The rest of eero's verification group, and a re-wrapped API error that carries an eero error
+    // code: a new start would send the user another message, so none is made.
+    let refusals: [(u16, Option<&str>); 8] = [
         (401, Some("error.verification.blocked")),
         (401, Some("error.verification.failure")),
         (401, Some("error.verification.required")),
@@ -531,7 +532,6 @@ async fn a_refused_verification_ends_the_login_after_one_start() -> anyhow::Resu
         (401, Some("error.too.many.resends")),
         (401, Some("error.email.unverified")),
         (403, Some("error.access.denied")),
-        (500, None),
     ];
     for (status, error) in refusals {
         let fx = Fixture::new().await;
@@ -570,6 +570,220 @@ async fn a_refused_start_ends_the_login_before_any_code_is_asked() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn a_verification_failure_without_a_status_or_an_eero_code_is_the_generic_failure()
+-> anyhow::Result<()> {
+    // A 5xx from eero is re-wrapped without a status and with no error code: it says nothing about
+    // the account, so it must not read as "eero refused the verification".
+    for status in [500u16, 502, 503] {
+        let fx = Fixture::new().await;
+        mount_start(&fx.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+        mount_verify_error(&fx.mock, LOGIN_TOKEN, CODE, status, None, 1).await;
+        let mut script = Script::answering(&[CODE, CODE_2]);
+        assert_eq!(
+            login(&fx, &mut script, None).await,
+            Err(LoginError::Other),
+            "{status}"
+        );
+        // Ended at once: no second code, no restart.
+        assert_eq!(script.codes_asked, [CodeKind::First], "{status}");
+        assert_eq!(targets_of(&fx.mock).await.len(), 2, "{status}");
+    }
+    Ok(())
+}
+
+// ===================== the start budget =====================
+
+#[test]
+fn the_budget_admits_its_limit_and_then_says_how_long_to_wait() {
+    let window = Duration::from_mins(15);
+    let budget = StartBudget::with_limit(3, window);
+    let t0 = tokio::time::Instant::now();
+    for step in 0..3u64 {
+        assert_eq!(budget.take_at(t0 + Duration::from_secs(step * 10)), Ok(()));
+    }
+    // The oldest start (t0) leaves the window at t0 + 900 s.
+    assert_eq!(
+        budget.take_at(t0 + Duration::from_secs(30)),
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: 870
+        })
+    );
+    // A refused start is not counted and does not move the window.
+    assert_eq!(
+        budget.take_at(t0 + Duration::from_secs(31)),
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: 869
+        })
+    );
+    // The window slides: when the first start leaves, exactly one more is admitted.
+    assert_eq!(budget.take_at(t0 + window), Ok(()));
+    assert_eq!(
+        budget.take_at(t0 + window + Duration::from_secs(1)),
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: 9
+        })
+    );
+    assert_eq!(
+        budget.take_at(t0 + window + Duration::from_secs(10)),
+        Ok(())
+    );
+}
+
+#[test]
+fn the_wait_is_rounded_up_to_whole_seconds_and_is_at_least_one() {
+    let budget = StartBudget::with_limit(1, Duration::from_mins(15));
+    let t0 = tokio::time::Instant::now();
+    assert_eq!(budget.take_at(t0), Ok(()));
+    for (elapsed, wait) in [
+        (Duration::from_millis(899_400), 1),
+        (Duration::from_millis(899_999), 1),
+        (Duration::from_millis(100_001), 800),
+        (Duration::from_secs(1), 899),
+    ] {
+        assert_eq!(
+            budget.take_at(t0 + elapsed),
+            Err(LoginError::StartBudgetExhausted {
+                retry_after_seconds: wait
+            }),
+            "{elapsed:?}"
+        );
+    }
+}
+
+#[test]
+fn checking_the_budget_takes_nothing_and_a_zero_budget_never_admits() {
+    let budget = StartBudget::with_limit(1, Duration::from_mins(15));
+    assert_eq!(budget.check(), Ok(()));
+    assert_eq!(budget.check(), Ok(()));
+    assert_eq!(budget.take(), Ok(()));
+    assert!(matches!(
+        budget.check(),
+        Err(LoginError::StartBudgetExhausted { .. })
+    ));
+    assert!(matches!(
+        budget.take(),
+        Err(LoginError::StartBudgetExhausted { .. })
+    ));
+
+    let none = StartBudget::with_limit(0, Duration::from_mins(15));
+    assert_eq!(
+        none.take(),
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: 900
+        })
+    );
+    // The production budget is three starts in fifteen minutes.
+    assert_eq!(eero_mcp::auth::START_BUDGET, 3);
+    assert_eq!(eero_mcp::auth::START_WINDOW, Duration::from_mins(15));
+    let standard = StartBudget::standard();
+    for _ in 0..3 {
+        assert_eq!(standard.take(), Ok(()));
+    }
+    assert!(standard.take().is_err());
+}
+
+#[tokio::test]
+async fn an_exhausted_budget_sends_nothing_and_does_not_even_ask_for_the_identifier()
+-> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    let budget = StartBudget::with_limit(0, Duration::from_mins(15));
+    let mut script = Script::answering(&[CODE]);
+
+    let result = run_login(Some(&fx.origin()), None, &mut script, None, &budget).await;
+
+    assert_eq!(
+        result.map(|token| token.expose_secret().to_owned()),
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: 900
+        })
+    );
+    assert_eq!(
+        script.identifiers_asked, 0,
+        "no form for a login that cannot start"
+    );
+    assert!(script.codes_asked.is_empty());
+    assert!(targets_of(&fx.mock).await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restart_after_a_rejected_code_takes_a_start_from_the_budget() -> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    // One start is allowed. The first code is rejected; the restart is refused and sends nothing.
+    mount_start(&fx.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_error(
+        &fx.mock,
+        LOGIN_TOKEN,
+        CODE,
+        401,
+        Some("error.verification.invalid"),
+        1,
+    )
+    .await;
+    let budget = StartBudget::with_limit(1, Duration::from_mins(15));
+    let mut script = Script::answering(&[CODE, CODE_2]);
+
+    let result = run_login(Some(&fx.origin()), None, &mut script, None, &budget).await;
+
+    assert!(matches!(
+        result,
+        Err(LoginError::StartBudgetExhausted { .. })
+    ));
+    assert_eq!(
+        script.codes_asked,
+        [CodeKind::First],
+        "no second code was asked for"
+    );
+    assert_eq!(
+        targets_of(&fx.mock).await,
+        ["POST /2.2/login", "POST /2.2/login/verify"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_budget_is_shared_by_every_run_and_a_refused_run_sends_nothing() -> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    mount_start(&fx.mock, IDENTIFIER, LOGIN_TOKEN, 3).await;
+    mount_verify_ok(&fx.mock, LOGIN_TOKEN, CODE, 3).await;
+    let budget = StartBudget::standard();
+    for run in 0..3 {
+        let mut script = Script::answering(&[CODE]);
+        let result = run_login(
+            Some(&fx.origin()),
+            Some(token(IDENTIFIER)),
+            &mut script,
+            None,
+            &budget,
+        )
+        .await;
+        assert!(result.is_ok(), "run {run} is within the budget");
+    }
+    assert_eq!(targets_of(&fx.mock).await.len(), 6);
+
+    let mut script = Script::answering(&[CODE]);
+    let result = run_login(
+        Some(&fx.origin()),
+        Some(token(IDENTIFIER)),
+        &mut script,
+        None,
+        &budget,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(LoginError::StartBudgetExhausted { retry_after_seconds }) if (1..=900).contains(&retry_after_seconds)
+    ));
+    assert!(script.codes_asked.is_empty());
+    assert_eq!(
+        targets_of(&fx.mock).await.len(),
+        6,
+        "the fourth run sent nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn rate_limits_network_failures_and_the_prompter_giving_up_end_the_login()
 -> anyhow::Result<()> {
     // A rate-limited start carries the wait.
@@ -595,9 +809,15 @@ async fn rate_limits_network_failures_and_the_prompter_giving_up_end_the_login()
 
     // A refused connection: a loopback port nothing listens on.
     let mut script = Script::answering(&[CODE]);
-    let result = run_login(Some("http://127.0.0.1:1"), None, &mut script, None)
-        .await
-        .map(|token| token.expose_secret().to_owned());
+    let result = run_login(
+        Some("http://127.0.0.1:1"),
+        None,
+        &mut script,
+        None,
+        &StartBudget::standard(),
+    )
+    .await
+    .map(|token| token.expose_secret().to_owned());
     assert_eq!(result, Err(LoginError::Network));
 
     // The prompter gives up before and after the start.
@@ -634,9 +854,15 @@ async fn a_permit_is_held_for_each_request_and_never_while_the_prompter_waits() 
 
     let permits = Arc::new(Semaphore::new(1));
     script.permits = Some(Arc::clone(&permits));
-    run_login(Some(&fx.origin()), None, &mut script, Some(&permits))
-        .await
-        .expect("the login succeeds");
+    run_login(
+        Some(&fx.origin()),
+        None,
+        &mut script,
+        Some(&permits),
+        &StartBudget::standard(),
+    )
+    .await
+    .expect("the login succeeds");
 
     // Asked for the identifier and twice for the code, each time with the one permit free.
     assert_eq!(script.free_when_asked, [1, 1, 1]);
@@ -648,7 +874,13 @@ async fn a_permit_is_held_for_each_request_and_never_while_the_prompter_waits() 
     let mut script = Script::answering(&[CODE]);
     let waiting = tokio::time::timeout(
         Duration::from_millis(200),
-        run_login(Some(&blocked.origin()), None, &mut script, Some(&none)),
+        run_login(
+            Some(&blocked.origin()),
+            None,
+            &mut script,
+            Some(&none),
+            &StartBudget::standard(),
+        ),
     )
     .await;
     assert!(waiting.is_err(), "the start waits for a permit");
@@ -709,9 +941,10 @@ async fn saving_to_the_file_alone_reports_the_file_and_writes_the_eero_api_recor
     assert!(store.has_backend());
     assert_eq!(store.file_path(), Some(fx.own_file().as_path()));
 
-    let kind = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+    let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
 
-    assert_eq!(kind, StoreKind::File);
+    assert_eq!(saved.kind, StoreKind::File);
+    assert_eq!(saved.replaced_count(), 0, "nothing was replaced");
     let saved: serde_json::Value = serde_json::from_str(&read(&fx.own_file()))?;
     assert_eq!(saved["session_id"], LOGIN_TOKEN);
     assert_eq!(saved["schema_version"], 2);
@@ -837,8 +1070,10 @@ async fn with_no_keyring_and_no_directory_there_is_nowhere_to_save() -> anyhow::
     assert!(store.file_path().is_none());
     let chain = Arc::new(CredentialChain::new(&settings, Arc::new(SystemSources)));
     assert_eq!(
-        save_session(&store, &chain, &token(LOGIN_TOKEN)).await,
-        Err(SaveError::NoLocation)
+        save_session(&store, &chain, &token(LOGIN_TOKEN))
+            .await
+            .expect_err("nowhere to save"),
+        SaveError::NoLocation
     );
     assert!(
         SaveError::NoLocation
@@ -860,7 +1095,7 @@ async fn the_save_error_texts_are_fixed_and_the_store_debug_prints_no_path() {
     ] {
         assert!(!error.describe().is_empty());
     }
-    let store = OwnStore::new(
+    let store = OwnStore::with_backends(
         None,
         Some(PathBuf::from("/home/someone/secret-dir/session.json")),
     );
@@ -882,6 +1117,129 @@ async fn clearing_removes_the_file_and_a_missing_record_is_fine() -> anyhow::Res
     assert!(fx.own_file().exists());
     assert_eq!(store.clear_all().await.file, Some(true));
     assert!(!fx.own_file().exists());
+    Ok(())
+}
+
+// ===================== logging in again =====================
+
+#[tokio::test]
+async fn logging_in_again_signs_the_replaced_session_out_once_the_new_one_is_stored()
+-> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
+    let settings = fx.settings(&[]);
+    let chain = fx.chain(&settings);
+    let store = OwnStore::production(&settings);
+    let base = settings.api_base_url.as_deref();
+
+    let first = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+    assert_eq!(first.replaced_count(), 0);
+    // Nothing replaced, nothing sent.
+    let outcome = revoke_replaced(base, &chain, first).await;
+    assert_eq!(
+        (outcome.revoked, outcome.held_elsewhere, outcome.not_sent),
+        (0, 0, 0)
+    );
+    assert!(targets_of(&fx.mock).await.is_empty());
+
+    let second = save_session(&store, &chain, &token(LOGIN_TOKEN_2)).await?;
+    assert_eq!(second.replaced_count(), 1);
+    // The value that carries the replaced token prints no token.
+    let shown = format!("{second:?}");
+    assert!(
+        !shown.contains(LOGIN_TOKEN) && !shown.contains(LOGIN_TOKEN_2),
+        "{shown}"
+    );
+    assert!(
+        read(&fx.own_file()).contains(LOGIN_TOKEN_2),
+        "the new session is stored first"
+    );
+    assert!(
+        targets_of(&fx.mock).await.is_empty(),
+        "saving alone sends nothing"
+    );
+
+    let outcome = revoke_replaced(base, &chain, second).await;
+    assert_eq!(
+        (outcome.revoked, outcome.held_elsewhere, outcome.not_sent),
+        (1, 0, 0)
+    );
+    assert_eq!(targets_of(&fx.mock).await, ["POST /2.2/logout"]);
+    assert!(read(&fx.own_file()).contains(LOGIN_TOKEN_2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn saving_the_session_that_is_already_stored_replaces_nothing() -> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    let settings = fx.settings(&[]);
+    let chain = fx.chain(&settings);
+    let store = OwnStore::production(&settings);
+    save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+
+    let again = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+
+    assert_eq!(
+        again.replaced_count(),
+        0,
+        "signing it out would end the new login"
+    );
+    let outcome = revoke_replaced(settings.api_base_url.as_deref(), &chain, again).await;
+    assert_eq!(outcome.revoked, 0);
+    assert!(targets_of(&fx.mock).await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_replaced_session_another_source_holds_is_not_signed_out() -> anyhow::Result<()> {
+    for holder in ["eeroctl file", "environment token", "explicit file"] {
+        let fx = Fixture::new().await;
+        let explicit = fx.dir.path().join("explicit.json");
+        let extra: Vec<(&str, String)> = match holder {
+            "environment token" => vec![("RUSTEERO_SESSION_TOKEN", LOGIN_TOKEN.to_owned())],
+            "explicit file" => vec![(
+                "EERO_MCP_SESSION_FILE",
+                explicit.to_str().expect("utf-8").to_owned(),
+            )],
+            _ => vec![],
+        };
+        let extra_refs: Vec<(&str, &str)> = extra.iter().map(|(a, b)| (*a, b.as_str())).collect();
+        let settings = fx.settings(&extra_refs);
+        let chain = fx.chain(&settings);
+        let store = OwnStore::production(&settings);
+
+        // The own file and the other source hold the same, older session.
+        let shared = record(LOGIN_TOKEN);
+        std::fs::create_dir_all(fx.own_dir())?;
+        std::fs::write(fx.own_file(), &shared)?;
+        match holder {
+            "eeroctl file" => {
+                std::fs::create_dir_all(fx.eeroctl_file().parent().expect("parent"))?;
+                std::fs::write(fx.eeroctl_file(), &shared)?;
+            }
+            "explicit file" => std::fs::write(&explicit, &shared)?,
+            _ => {}
+        }
+
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN_2)).await?;
+        assert_eq!(saved.replaced_count(), 1, "{holder}");
+        let outcome = revoke_replaced(settings.api_base_url.as_deref(), &chain, saved).await;
+
+        assert_eq!(
+            (outcome.revoked, outcome.held_elsewhere, outcome.not_sent),
+            (0, 1, 0),
+            "{holder}"
+        );
+        assert!(
+            targets_of(&fx.mock).await.is_empty(),
+            "{holder}: no sign-out"
+        );
+        match holder {
+            "eeroctl file" => assert_eq!(read(&fx.eeroctl_file()), shared),
+            "explicit file" => assert_eq!(read(&explicit), shared),
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -1174,14 +1532,14 @@ mod with_keyring {
         let fx = Fixture::new().await;
         let keyring = Arc::new(MemoryStore::new());
         let (settings, chain) = stand_in_chain(&fx, &keyring);
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
 
-        let kind = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
 
-        assert_eq!(kind, StoreKind::Keyring);
+        assert_eq!(saved.kind, StoreKind::Keyring);
         assert!(!fx.own_file().exists(), "the file is only the fallback");
         let resolved = chain.startup_resolved().expect("ok").expect("a hit");
         assert_eq!(resolved.source, Source::OwnKeyring);
@@ -1193,7 +1551,7 @@ mod with_keyring {
         let fx = Fixture::new().await;
         let keyring = Arc::new(MemoryStore::new());
         let (settings, chain) = stand_in_chain(&fx, &keyring);
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
@@ -1201,9 +1559,9 @@ mod with_keyring {
         std::fs::create_dir_all(fx.own_dir())?;
         std::fs::write(fx.own_file(), record("older-session"))?;
 
-        let kind = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
 
-        assert_eq!(kind, StoreKind::Keyring);
+        assert_eq!(saved.kind, StoreKind::Keyring);
         assert!(
             !fx.own_file().exists(),
             "the leftover record of the earlier login is removed"
@@ -1227,14 +1585,14 @@ mod with_keyring {
             &settings,
             Arc::new(OlderRecord(Arc::clone(&broken))),
         ));
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&broken) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
 
-        let kind = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
 
-        assert_eq!(kind, StoreKind::File);
+        assert_eq!(saved.kind, StoreKind::File);
         assert!(read(&fx.own_file()).contains(LOGIN_TOKEN));
         Ok(())
     }
@@ -1251,15 +1609,15 @@ mod with_keyring {
             &settings,
             Arc::new(OlderRecord(Arc::clone(&broken))),
         ));
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&broken) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
 
         // The keyring read still shows the older record, which would win; the save clears it.
-        let kind = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
 
-        assert_eq!(kind, StoreKind::File);
+        assert_eq!(saved.kind, StoreKind::File);
         assert_eq!(broken.older.lock().expect("lock").as_deref(), None);
         assert_eq!(
             chain.own_store_token().expect("a token").expose_secret(),
@@ -1281,7 +1639,7 @@ mod with_keyring {
             &settings,
             Arc::new(OlderRecord(Arc::clone(&broken))),
         ));
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&broken) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
@@ -1292,6 +1650,83 @@ mod with_keyring {
             .await
             .expect_err("shadowed");
         assert_eq!(error, SaveError::Shadowed);
+
+        // A failed save means nothing was stored: the record the save wrote is removed again, so
+        // it cannot resurface (revoked, and unused) when the older keyring record goes away. The
+        // older record itself is untouched.
+        assert!(
+            !fx.own_file().exists(),
+            "the new session is not left in the file"
+        );
+        assert_eq!(
+            broken.older.lock().expect("lock").as_deref(),
+            Some("older-session")
+        );
+        assert_eq!(
+            chain.own_store_token().expect("a token").expose_secret(),
+            "older-session"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logging_in_again_replaces_the_keyring_and_the_file_session_and_signs_both_out()
+    -> anyhow::Result<()> {
+        let fx = Fixture::new().await;
+        mount_logout(&fx.mock, "older-keyring-session", 1).await;
+        mount_logout(&fx.mock, "older-file-session", 1).await;
+        let keyring = Arc::new(MemoryStore::new());
+        let (settings, chain) = stand_in_chain(&fx, &keyring);
+        let store = OwnStore::with_backends(
+            Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
+            settings.own_file.clone(),
+        );
+        keyring.save(&Session::from_token("older-keyring-session"))?;
+        std::fs::create_dir_all(fx.own_dir())?;
+        std::fs::write(fx.own_file(), record("older-file-session"))?;
+
+        let saved = save_session(&store, &chain, &token(LOGIN_TOKEN)).await?;
+
+        assert_eq!(saved.kind, StoreKind::Keyring);
+        assert_eq!(saved.replaced_count(), 2);
+        assert!(!fx.own_file().exists());
+        let outcome = revoke_replaced(settings.api_base_url.as_deref(), &chain, saved).await;
+        assert_eq!(
+            (outcome.revoked, outcome.held_elsewhere, outcome.not_sent),
+            (2, 0, 0)
+        );
+        let mut sent = targets_of(&fx.mock).await;
+        sent.dedup();
+        assert_eq!(sent, ["POST /2.2/logout"]);
+        assert_eq!(targets_of(&fx.mock).await.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_replaces_nothing_and_signs_nothing_out() -> anyhow::Result<()> {
+        let fx = Fixture::new().await;
+        let broken = Arc::new(BrokenKeyring {
+            older: Mutex::new(Some("older-session".to_owned())),
+            clear_works: false,
+        });
+        let settings = fx.settings_with_keyring(true, &[]);
+        let chain = Arc::new(CredentialChain::new(
+            &settings,
+            Arc::new(OlderRecord(Arc::clone(&broken))),
+        ));
+        let store = OwnStore::with_backends(
+            Some(Arc::clone(&broken) as Arc<dyn CredentialStore>),
+            settings.own_file.clone(),
+        );
+
+        // Shadowed: the save fails, so there is no `Saved` to revoke anything from, and the older
+        // session is still the stored one.
+        assert!(
+            save_session(&store, &chain, &token(LOGIN_TOKEN))
+                .await
+                .is_err()
+        );
+        assert!(targets_of(&fx.mock).await.is_empty());
         Ok(())
     }
 
@@ -1303,7 +1738,7 @@ mod with_keyring {
         mount_logout(&fx.mock, LOGIN_TOKEN_2, 1).await;
         let keyring = Arc::new(MemoryStore::new());
         let (settings, chain) = stand_in_chain(&fx, &keyring);
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
@@ -1328,7 +1763,7 @@ mod with_keyring {
         mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
         let keyring = Arc::new(MemoryStore::new());
         let (settings, chain) = stand_in_chain(&fx, &keyring);
-        let store = OwnStore::new(
+        let store = OwnStore::with_backends(
             Some(Arc::clone(&keyring) as Arc<dyn CredentialStore>),
             settings.own_file.clone(),
         );
@@ -1463,6 +1898,51 @@ async fn a_terminal_login_saves_the_session_and_a_failed_save_signs_it_out_again
             "POST /2.2/login/verify",
             "POST /2.2/logout"
         ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_second_terminal_login_signs_the_first_session_out() -> anyhow::Result<()> {
+    let fx = Fixture::new().await;
+    // Two logins, each with its own login token; the first session is signed out after the second
+    // is stored.
+    mount_start(&fx.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_ok(&fx.mock, LOGIN_TOKEN, CODE, 1).await;
+    mount_start(&fx.mock, IDENTIFIER, LOGIN_TOKEN_2, 1).await;
+    mount_verify_ok(&fx.mock, LOGIN_TOKEN_2, CODE_2, 1).await;
+    mount_logout(&fx.mock, LOGIN_TOKEN, 1).await;
+    let settings = fx.settings(&[]);
+    let chain = fx.chain(&settings);
+
+    assert_eq!(
+        cli::run_login_command(&settings, &chain, Lines::new(&[IDENTIFIER, CODE])).await,
+        0
+    );
+    assert_eq!(
+        targets_of(&fx.mock).await.len(),
+        2,
+        "the first login signs nothing out"
+    );
+    assert_eq!(
+        cli::run_login_command(&settings, &chain, Lines::new(&[IDENTIFIER, CODE_2])).await,
+        0
+    );
+
+    assert_eq!(
+        targets_of(&fx.mock).await,
+        [
+            "POST /2.2/login",
+            "POST /2.2/login/verify",
+            "POST /2.2/login",
+            "POST /2.2/login/verify",
+            "POST /2.2/logout"
+        ]
+    );
+    let stored = read(&fx.own_file());
+    assert!(
+        stored.contains(LOGIN_TOKEN_2) && !stored.contains(LOGIN_TOKEN),
+        "{stored}"
     );
     Ok(())
 }

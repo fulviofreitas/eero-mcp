@@ -19,6 +19,12 @@
 //! [`Prompter`]. The driver returns the verified token and saves nothing: a front end decides
 //! what to do with it ([`save_session`]), which lets the chat check for cancellation first.
 //!
+//! Every start (the first one and every restart after a rejected code) is taken from a
+//! [`StartBudget`] before its request is built: [`START_BUDGET`] starts per [`START_WINDOW`] for a
+//! server process, shared by all its login calls. The limits above bound one run; the budget bounds
+//! the messages eero sends when calls repeat (a cancelled call, a host that retries). A start that
+//! the budget refuses sends nothing.
+//!
 //! The identifier and the code are held as secrets and never logged, echoed or placed in an
 //! error. Error classification branches on rusteero error variants, statuses and error codes
 //! only, never on message text, and every text this module produces is fixed.
@@ -28,12 +34,16 @@
 //! [`OwnStore`] saves a session to eero-mcp's own keyring entry (with its own file as the
 //! fallback) or to the own file alone, then reads it back through the same raw read the server
 //! uses, reports which backend holds it, removes a leftover record of an earlier login from the
-//! other backend, and checks that the own store now resolves to the new session.
+//! other backend, and checks that the own store now resolves to the new session. A save that
+//! replaced an earlier eero-mcp session hands its token back ([`Saved`]) so the caller can sign it
+//! out once the new one is in use ([`revoke_replaced`]).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 #[cfg(feature = "keyring")]
 use rusteero::KeyringStore;
@@ -43,6 +53,7 @@ use rusteero::transport::Transport;
 use rusteero::{ChainedStore, CredentialStore, Error, FileStore, Session, StorageError};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 #[cfg(feature = "keyring")]
 use crate::config::{OWN_KEYRING_ACCOUNT, OWN_KEYRING_SERVICE};
@@ -56,6 +67,10 @@ pub const MAX_IDENTIFIER_ENTRIES: u8 = 3;
 pub const MAX_RESENDS: u8 = 3;
 /// Verification attempts per login run (each rejected code restarts the flow once).
 pub const MAX_ATTEMPTS: u8 = 3;
+/// Login starts a server process may make per [`START_WINDOW`].
+pub const START_BUDGET: usize = 3;
+/// The sliding window of the start budget.
+pub const START_WINDOW: Duration = Duration::from_mins(15);
 
 /// The longest identifier accepted, in characters.
 const MAX_IDENTIFIER_CHARS: usize = 254;
@@ -181,6 +196,11 @@ pub enum LoginError {
         /// Whole seconds to wait, rounded up, when eero sent `Retry-After`.
         retry_after_seconds: Option<u64>,
     },
+    /// The [`StartBudget`] is used up, so no start was sent.
+    StartBudgetExhausted {
+        /// Whole seconds until the oldest start leaves the window, rounded up, at least 1.
+        retry_after_seconds: u64,
+    },
     /// eero could not be reached.
     Network,
     /// eero did not answer in time.
@@ -201,6 +221,7 @@ impl fmt::Display for LoginError {
             Self::VerificationRefused => "eero refused the verification",
             Self::TooManyInvalidIdentifiers => "no valid identifier was entered",
             Self::RateLimited { .. } => "eero rate-limited the login",
+            Self::StartBudgetExhausted { .. } => "the limit of login starts is used up",
             Self::Network => "eero could not be reached",
             Self::Timeout => "eero did not answer in time",
             Self::UnusableToken => "eero returned a session that cannot be used",
@@ -211,6 +232,76 @@ impl fmt::Display for LoginError {
 }
 
 impl std::error::Error for LoginError {}
+
+/// A sliding-window budget of login starts, shared by every login of a process.
+///
+/// Each start makes eero send the account's owner an email or SMS, and the per-run limits do not
+/// bound repeated runs: a call that is cancelled or abandoned releases its lock, and the next call
+/// starts again. The budget is taken before a start's request is built, so a refused start sends
+/// nothing, and a start counts whether or not its request succeeds.
+#[derive(Debug)]
+pub struct StartBudget {
+    limit: usize,
+    window: Duration,
+    starts: Mutex<VecDeque<Instant>>,
+}
+
+impl StartBudget {
+    /// The production budget: [`START_BUDGET`] starts per [`START_WINDOW`].
+    pub fn standard() -> Self {
+        Self::with_limit(START_BUDGET, START_WINDOW)
+    }
+
+    /// A budget of `limit` starts per `window` (tests use small ones).
+    pub fn with_limit(limit: usize, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            starts: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Whether a start would be admitted now, without taking it (the chat checks before it asks
+    /// for the identifier, so the user does not fill in a form for a login that cannot start).
+    pub fn check(&self) -> Result<(), LoginError> {
+        self.admit(Instant::now(), false)
+    }
+
+    /// Takes one start, or says how long until one frees up.
+    pub fn take(&self) -> Result<(), LoginError> {
+        self.take_at(Instant::now())
+    }
+
+    /// [`StartBudget::take`] with an explicit clock reading.
+    pub fn take_at(&self, now: Instant) -> Result<(), LoginError> {
+        self.admit(now, true)
+    }
+
+    fn admit(&self, now: Instant, take: bool) -> Result<(), LoginError> {
+        let mut starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
+        while starts
+            .front()
+            .is_some_and(|oldest| now.saturating_duration_since(*oldest) >= self.window)
+        {
+            starts.pop_front();
+        }
+        if starts.len() < self.limit {
+            if take {
+                starts.push_back(now);
+            }
+            return Ok(());
+        }
+        let wait = starts.front().map_or(self.window, |oldest| {
+            (*oldest + self.window).saturating_duration_since(now)
+        });
+        Err(LoginError::StartBudgetExhausted {
+            retry_after_seconds: wait
+                .as_secs()
+                .saturating_add(u64::from(wait.subsec_nanos() > 0))
+                .max(1),
+        })
+    }
+}
 
 /// Builds the login flow on its own transport: no session, no store, default timeouts and
 /// User-Agent, redirects refused. The base URL is applied only when it passes the same rule as
@@ -251,16 +342,21 @@ enum Verdict {
 
 /// Classifies a failed verification by variant, status and error code. A wrong code is a 401
 /// without an error code, or `error.verification.invalid` / `.expired`; eero refusing the code's
-/// format (a typo) counts too. The rest of the verification group (blocked, too many resends,
-/// unknown or blocked login, unverified email) ends the run: a new start would send the user
-/// another message.
+/// format (a typo) counts too. Any other eero error code (the rest of the verification group:
+/// blocked, too many resends, unknown or blocked login, unverified email) ends the run as a
+/// refusal: a new start would send the user another message. An error with neither a status nor
+/// a code ends it as a generic failure.
 fn classify_verification_failure(error: &Error) -> Verdict {
     match error {
         Error::Validation { .. } => Verdict::Rejected,
         Error::Authentication { .. } => match error.error_code() {
             Some("error.verification.invalid" | "error.verification.expired") => Verdict::Rejected,
             None if error.status() == Some(401) => Verdict::Rejected,
-            _ => Verdict::Fatal(LoginError::VerificationRefused),
+            // A re-wrapped API error that carries neither a status nor an eero error code (a 5xx
+            // from eero, say) says nothing about the account: the generic failure, so the user
+            // is not told that eero refused the verification.
+            None => Verdict::Fatal(LoginError::Other),
+            Some(_) => Verdict::Fatal(LoginError::VerificationRefused),
         },
         other => Verdict::Fatal(transport_failure(other)),
     }
@@ -332,13 +428,31 @@ async fn ask_code<P: Prompter>(
     }
 }
 
+/// Starts the login: takes one start from `budget` and, only when it is admitted, sends the
+/// request. The budget is taken once the caller holds its permit, immediately before the request.
+async fn start_login(
+    flow: &LoginFlow,
+    identifier: &SecretString,
+    budget: &StartBudget,
+) -> Result<PendingLogin, LoginError> {
+    budget.take()?;
+    flow.start(identifier.expose_secret())
+        .await
+        .map_err(|error| match error {
+            Error::Authentication { .. } => LoginError::RefusedStart,
+            other => transport_failure(&other),
+        })
+}
+
 /// Runs one login and returns the verified session token. Nothing is saved.
 ///
 /// `identifier` is the one the caller already has (the login tool's argument); without it the
 /// prompter is asked. `permits` is the server's semaphore: each start, resend and verify takes
 /// one permit for its duration, and none is held while the prompter waits for the user.
-/// `api_base_url` is `EERO_MCP_API_BASE_URL`, when set (it is applied only if it passes the
-/// Client builder's rule).
+/// `budget` is the process's [`StartBudget`]: it is checked before the identifier is asked for
+/// and taken before every start, restarts included; when it is used up the run ends with
+/// [`LoginError::StartBudgetExhausted`] and nothing is sent. `api_base_url` is
+/// `EERO_MCP_API_BASE_URL`, when set (it is applied only if it passes the Client builder's rule).
 ///
 /// Dropping the returned future abandons the run at its current await point: an in-flight wait or
 /// request is dropped with the pending login, and nothing more is sent.
@@ -347,8 +461,10 @@ pub async fn run_login<P: Prompter>(
     identifier: Option<SecretString>,
     prompter: &mut P,
     permits: Option<&Semaphore>,
+    budget: &StartBudget,
 ) -> Result<SecretString, LoginError> {
     let flow = login_flow(api_base_url).map_err(|_| LoginError::Other)?;
+    budget.check()?;
     let identifier = match identifier {
         Some(identifier) => identifier,
         None => ask_identifier(prompter).await?,
@@ -357,12 +473,7 @@ pub async fn run_login<P: Prompter>(
     let mut resends: u8 = 0;
     let mut kind = CodeKind::First;
     loop {
-        let pending = with_permit(permits, flow.start(identifier.expose_secret()))
-            .await?
-            .map_err(|error| match error {
-                Error::Authentication { .. } => LoginError::RefusedStart,
-                other => transport_failure(&other),
-            })?;
+        let pending = with_permit(permits, start_login(&flow, &identifier, budget)).await??;
         let code = ask_code(prompter, &pending, &mut kind, &mut resends, permits).await?;
         match with_permit(permits, pending.verify(code.expose_secret())).await? {
             Ok(session) => {
@@ -422,7 +533,8 @@ pub enum SaveError {
     Backend,
     /// An input-output failure writing the own file.
     Io,
-    /// The save worked but another own record still resolves first.
+    /// The save worked but another own record still resolves first. The record the save wrote is
+    /// removed again, so nothing new is stored.
     Shadowed,
     /// Anything else.
     Other,
@@ -466,7 +578,10 @@ impl std::error::Error for SaveError {}
 
 /// eero-mcp's own credential store: an optional keyring backend and an optional own file path.
 ///
-/// Production builds it with [`OwnStore::production`]; tests inject a stand-in keyring backend
+/// Production builds it with [`OwnStore::production`], the only constructor the rest of the crate
+/// may call (the read-only guard pins that): the own file's path is the settings' own-file path and
+/// nothing else, so no caller can point the store at the explicit credential file or at eeroctl's
+/// file. A second, hidden constructor lets the integration tests inject a stand-in keyring backend
 /// and a temporary path. The store only saves and clears (never loads): reads go through the
 /// credential chain's raw read.
 pub struct OwnStore {
@@ -484,8 +599,10 @@ impl fmt::Debug for OwnStore {
 }
 
 impl OwnStore {
-    /// A store over the given backends.
-    pub fn new(keyring: Option<Arc<dyn CredentialStore>>, file: Option<PathBuf>) -> Self {
+    /// A store over the given backends, for the integration tests (stand-in keyring, temporary
+    /// path). Nothing in the crate calls it.
+    #[doc(hidden)]
+    pub fn with_backends(keyring: Option<Arc<dyn CredentialStore>>, file: Option<PathBuf>) -> Self {
         Self { keyring, file }
     }
 
@@ -501,7 +618,10 @@ impl OwnStore {
         });
         #[cfg(not(feature = "keyring"))]
         let keyring: Option<Arc<dyn CredentialStore>> = None;
-        Self::new(keyring, settings.own_file.clone())
+        Self {
+            keyring,
+            file: settings.own_file.clone(),
+        }
     }
 
     /// Whether there is anywhere to save a session.
@@ -588,22 +708,45 @@ fn holds(held: Option<&SecretString>, expected: &SecretString) -> bool {
     held.is_some_and(|held| held.expose_secret() == expected.expose_secret())
 }
 
+/// A session saved to the own store.
+#[derive(Debug, Clone)]
+pub struct Saved {
+    /// The backend that holds the new session.
+    pub kind: StoreKind,
+    /// The sessions of earlier logins that the save replaced (their tokens differ from the new
+    /// one). Each is still live at eero until [`revoke_replaced`] ends it.
+    replaced: Vec<SecretString>,
+}
+
+impl Saved {
+    /// How many earlier eero-mcp sessions the save replaced.
+    pub fn replaced_count(&self) -> usize {
+        self.replaced.len()
+    }
+}
+
 /// Saves a verified session to the own store and proves it landed.
 ///
-/// 1. Saves through rusteero's verified stores on tokio's blocking pool (the keyring first with
+/// 1. Reads what the own store holds now, so the sessions a successful save replaces can be
+///    signed out afterwards.
+/// 2. Saves through rusteero's verified stores on tokio's blocking pool (the keyring first with
 ///    the own file as the fallback; either alone when only one exists).
-/// 2. Reads the own store back through the credential chain's raw read: the backend whose record
+/// 3. Reads the own store back through the credential chain's raw read: the backend whose record
 ///    equals the new token is the store reported.
-/// 3. Removes a leftover record of an earlier login from the other backend (best effort):
+/// 4. Removes a leftover record of an earlier login from the other backend (best effort):
 ///    rusteero's chained store retires only records it wrote itself, and a fresh instance has
 ///    written none.
-/// 4. Checks that the own store now resolves to the new token.
+/// 5. Checks that the own store now resolves to the new token. When it does not (an older record
+///    that can be read but not overwritten or cleared still comes first), the record the save
+///    wrote is removed again, best effort, so that a failed save leaves nothing stored: the new
+///    session is not kept anywhere, and the caller signs it out or keeps it in memory only.
 pub async fn save_session(
     store: &OwnStore,
     chain: &Arc<CredentialChain>,
     token: &SecretString,
-) -> Result<StoreKind, SaveError> {
+) -> Result<Saved, SaveError> {
     let backend = store.backend().ok_or(SaveError::NoLocation)?;
+    let before = read_chain(chain, CredentialChain::own_records).await;
     let session = Session::from_token(token.expose_secret());
     save_async(backend, session)
         .await
@@ -635,11 +778,30 @@ pub async fn save_session(
     let resolved = read_chain(chain, CredentialChain::own_store_token)
         .await
         .ok_or(SaveError::Other)?;
-    if holds(resolved.as_ref(), token) {
-        Ok(kind)
-    } else {
-        Err(SaveError::Shadowed)
+    if !holds(resolved.as_ref(), token) {
+        match kind {
+            StoreKind::File => store.clear_file().await,
+            StoreKind::Keyring => store.clear_keyring().await,
+            StoreKind::Memory => false,
+        };
+        return Err(SaveError::Shadowed);
     }
+
+    let mut replaced: Vec<SecretString> = Vec::new();
+    for record in before
+        .iter()
+        .flat_map(|before| [&before.keyring, &before.file])
+    {
+        if let Some(previous) = record.token()
+            && !holds(Some(previous), token)
+            && !replaced
+                .iter()
+                .any(|known| known.expose_secret() == previous.expose_secret())
+        {
+            replaced.push(previous.clone());
+        }
+    }
+    Ok(Saved { kind, replaced })
 }
 
 // ===================== sign-out =====================
@@ -653,6 +815,81 @@ pub async fn revoke_session(api_base_url: Option<&str>, token: &SecretString) ->
         Ok(client) => client.logout().await.is_ok(),
         Err(_) => false,
     }
+}
+
+/// What the credential sources other than eero-mcp's own store hold: the environment token, the
+/// explicit file, the shared keyring entry and eeroctl's file, read raw. Returns the tokens found
+/// (with their source) and the sources that could not be read, so a copy of a token there cannot be
+/// ruled out.
+async fn read_other_sources(
+    chain: &Arc<CredentialChain>,
+) -> (Vec<(Source, SecretString)>, Vec<Source>) {
+    let mut held: Vec<(Source, SecretString)> = Vec::new();
+    let mut unchecked: Vec<Source> = Vec::new();
+    for source in [
+        Source::EnvToken,
+        Source::ExplicitFile,
+        Source::SharedKeyring,
+        Source::EeroctlFile,
+    ] {
+        match read_chain(chain, move |chain| chain.probe(source)).await {
+            Some(Probe::Token(token)) => held.push((source, token)),
+            Some(Probe::Empty) => {}
+            Some(Probe::NotChecked) | None => unchecked.push(source),
+        }
+    }
+    (held, unchecked)
+}
+
+/// The sources among `others` that hold `token`.
+fn sources_holding(others: &[(Source, SecretString)], token: &SecretString) -> Vec<Source> {
+    others
+        .iter()
+        .filter(|(_, other)| holds(Some(other), token))
+        .map(|(source, _)| *source)
+        .collect()
+}
+
+/// What signing out the sessions a re-login replaced came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacedOutcome {
+    /// Sessions for which a sign-out request was sent.
+    pub revoked: usize,
+    /// Sessions left alone because another credential source holds the same token.
+    pub held_elsewhere: usize,
+    /// Sessions whose sign-out request could not be sent at all (the Client could not be built).
+    pub not_sent: usize,
+}
+
+/// Signs out, best effort, the earlier eero-mcp sessions that `saved` replaced, so that logging in
+/// again ends the old session instead of leaving it live at eero in no store. A session another
+/// credential source (environment token, explicit file, shared keyring entry, eeroctl's file) holds
+/// too is skipped: ending it would end that login as well. Call it once the new session is in use.
+/// rusteero ignores eero's answer, so a counted request means only that it was sent.
+pub async fn revoke_replaced(
+    api_base_url: Option<&str>,
+    chain: &Arc<CredentialChain>,
+    saved: Saved,
+) -> ReplacedOutcome {
+    let mut outcome = ReplacedOutcome {
+        revoked: 0,
+        held_elsewhere: 0,
+        not_sent: 0,
+    };
+    if saved.replaced.is_empty() {
+        return outcome;
+    }
+    let (others, _unchecked) = read_other_sources(chain).await;
+    for token in &saved.replaced {
+        if !sources_holding(&others, token).is_empty() {
+            outcome.held_elsewhere += 1;
+        } else if revoke_session(api_base_url, token).await {
+            outcome.revoked += 1;
+        } else {
+            outcome.not_sent += 1;
+        }
+    }
+    outcome
 }
 
 /// A store or source whose contents could not be checked.
@@ -675,7 +912,7 @@ pub struct HeldElsewhere {
 }
 
 /// What a logout did.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogoutReport {
     /// The own backends in which a record was found.
     pub found: Vec<StoreKind>,
@@ -696,6 +933,20 @@ pub struct LogoutReport {
 }
 
 impl LogoutReport {
+    /// A report of a logout that has done nothing yet.
+    fn blank() -> Self {
+        Self {
+            found: Vec::new(),
+            revoked: Vec::new(),
+            held_elsewhere: Vec::new(),
+            revoke_not_sent: 0,
+            removed: Vec::new(),
+            delete_failed: Vec::new(),
+            not_checked: Vec::new(),
+            next_source: None,
+        }
+    }
+
     /// Whether every own backend that was checked ended empty.
     pub fn ok(&self) -> bool {
         self.delete_failed.is_empty()
@@ -718,7 +969,7 @@ pub async fn sign_out_own_session(
     store: &OwnStore,
     chain: &Arc<CredentialChain>,
 ) -> LogoutReport {
-    let mut report = LogoutReport::default();
+    let mut report = LogoutReport::blank();
 
     let records = read_chain(chain, CredentialChain::own_records).await;
     let (keyring, file) = records.map_or((OwnRecord::Absent, OwnRecord::Absent), |records| {
@@ -750,27 +1001,12 @@ pub async fn sign_out_own_session(
     }
 
     if !sessions.is_empty() {
-        let mut others: Vec<(Source, SecretString)> = Vec::new();
-        for source in [
-            Source::EnvToken,
-            Source::ExplicitFile,
-            Source::SharedKeyring,
-            Source::EeroctlFile,
-        ] {
-            match read_chain(chain, move |chain| chain.probe(source)).await {
-                Some(Probe::Token(token)) => others.push((source, token)),
-                Some(Probe::Empty) => {}
-                Some(Probe::NotChecked) | None => {
-                    report.not_checked.push(NotChecked::Source(source));
-                }
-            }
-        }
+        let (others, unchecked) = read_other_sources(chain).await;
+        report
+            .not_checked
+            .extend(unchecked.into_iter().map(NotChecked::Source));
         for (token, stores) in sessions {
-            let sources: Vec<Source> = others
-                .iter()
-                .filter(|(_, other)| holds(Some(other), &token))
-                .map(|(source, _)| *source)
-                .collect();
+            let sources = sources_holding(&others, &token);
             if !sources.is_empty() {
                 report
                     .held_elsewhere

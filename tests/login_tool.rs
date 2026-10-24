@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use common::{
     CODE, CODE_2, IDENTIFIER, LOGIN_TOKEN, LOGIN_TOKEN_2, authed_get_as, error_json, fixture,
-    json_response, mock_cloud, mount_resend, mount_start, mount_start_error, mount_verify_error,
-    mount_verify_ok, structured, targets_of,
+    json_response, mock_cloud, mount_logout, mount_resend, mount_start, mount_start_error,
+    mount_verify_error, mount_verify_ok, structured, targets_of,
 };
 use eero_mcp::auth::{OwnStore, save_session};
 use eero_mcp::config::{EnvMap, Settings};
@@ -1173,6 +1173,233 @@ async fn progress_notifications_with_fixed_text_go_out_while_a_form_is_open() ->
     for message in &progress {
         assert_clean(message);
     }
+    Ok(())
+}
+
+// ===================== the start budget =====================
+
+/// Waits until the login lock is free again after a cancellation: a call with an invalid argument
+/// is answered as such once the lock is free, and as "in progress" before (rmcp cancels the
+/// handler's token asynchronously). The probe is refused before any request and takes nothing from
+/// the start budget.
+async fn wait_for_the_login_lock(rig: &Rig) -> anyhow::Result<()> {
+    for _ in 0..100 {
+        let probe = error_of(&rig.login(json!({"identifier": 5})).await?)?;
+        if probe["code"] == "invalid_argument" {
+            return Ok(());
+        }
+        assert!(
+            probe["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already in progress"),
+            "{probe}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("the login lock was never released after the cancellation")
+}
+
+#[tokio::test]
+async fn cancelled_calls_stop_sending_login_starts_once_the_budget_is_used_up() -> anyhow::Result<()>
+{
+    // Each call carries the identifier, so its start goes out at once; then the code form is held
+    // open and the host gives up on the call. The lock is free again after each, but the starts
+    // already made stay counted.
+    let rig = Rig::start(Options::new(vec![
+        Reply::Hold(Box::new(code(CODE))),
+        Reply::Hold(Box::new(code(CODE))),
+        Reply::Hold(Box::new(code(CODE))),
+    ]))
+    .await?;
+    // Exactly three starts are expected; a fourth would hit the write tripwire.
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 3).await;
+
+    for call in 1..=3usize {
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new("login").with_arguments(object!({"identifier": IDENTIFIER})),
+        ));
+        let handle = rig
+            .client
+            .peer()
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await?;
+        rig.forms_arrived(1).await;
+        assert_eq!(
+            targets_of(&rig.mock).await.len(),
+            call,
+            "start number {call}"
+        );
+        handle
+            .cancel(Some("test: the host timed out".to_owned()))
+            .await?;
+        wait_for_the_login_lock(&rig).await?;
+    }
+    assert_eq!(rig.shown().len(), 3);
+
+    // The budget is used up: the next calls answer at once with fixed text and the wait, show no
+    // form and send nothing.
+    for _ in 0..2 {
+        let result = rig.login(json!({"identifier": IDENTIFIER})).await?;
+        let error = error_of(&result)?;
+        assert_eq!(error["code"], "rate_limited");
+        let wait = error["retry_after_seconds"].as_u64().expect("a wait");
+        assert!((1..=900).contains(&wait), "{error}");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("3 in 15 minutes") && message.contains("Nothing was sent"),
+            "{message}"
+        );
+        assert_result_clean(&result);
+    }
+    assert_eq!(rig.shown().len(), 3, "no further form");
+    assert_eq!(
+        targets_of(&rig.mock).await,
+        ["POST /2.2/login", "POST /2.2/login", "POST /2.2/login"],
+        "once the budget is used up no call sends a start"
+    );
+    // Nothing was ever saved or installed.
+    assert!(!rig.own_file().exists());
+    let read = error_of(&rig.get_account().await?)?;
+    assert_eq!(read["code"], "authentication_required");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_restarts_of_a_call_use_the_budget_and_the_next_call_does_not_even_ask()
+-> anyhow::Result<()> {
+    // Three wrong codes are three starts: the whole budget.
+    let rig = Rig::start(Options::new(vec![
+        identifier(),
+        code(CODE),
+        code(CODE),
+        code(CODE),
+    ]))
+    .await?;
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 3).await;
+    mount_verify_error(
+        &rig.mock,
+        LOGIN_TOKEN,
+        CODE,
+        401,
+        Some("error.verification.invalid"),
+        3,
+    )
+    .await;
+    let first = error_of(&rig.login(json!({})).await?)?;
+    assert_eq!(first["code"], "login_failed");
+    assert_eq!(rig.shown().len(), 4);
+    assert_eq!(targets_of(&rig.mock).await.len(), 6);
+
+    // Without an identifier argument the identifier form would come first; the budget is checked
+    // before it, so the user is not asked for an identifier for a login that cannot start.
+    let second = error_of(&rig.login(json!({})).await?)?;
+    assert_eq!(second["code"], "rate_limited");
+    assert_eq!(rig.shown().len(), 4, "no identifier form");
+    assert_eq!(targets_of(&rig.mock).await.len(), 6, "nothing was sent");
+    Ok(())
+}
+
+// ===================== review fixes =====================
+
+#[tokio::test]
+async fn a_server_error_at_verification_is_the_generic_failure_not_a_refusal() -> anyhow::Result<()>
+{
+    let rig = Rig::start(Options::new(vec![identifier(), code(CODE), code(CODE)])).await?;
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_error(&rig.mock, LOGIN_TOKEN, CODE, 500, None, 1).await;
+
+    let result = rig.login(json!({})).await?;
+
+    let error = error_of(&result)?;
+    assert_eq!(error["code"], "login_failed");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert_eq!(message, "The login failed. Nothing was saved.");
+    assert!(!message.contains("refused"), "{message}");
+    assert_result_clean(&result);
+    assert_eq!(rig.shown().len(), 2, "no further code form");
+    assert_eq!(targets_of(&rig.mock).await.len(), 2, "no restart");
+    assert!(!rig.own_file().exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zero_progress_interval_is_raised_instead_of_panicking_the_form_ticker()
+-> anyhow::Result<()> {
+    let mut options = Options::new(vec![identifier(), code(CODE)]);
+    options.progress_interval = Some(Duration::ZERO);
+    let rig = Rig::start(options).await?;
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_ok(&rig.mock, LOGIN_TOKEN, CODE, 1).await;
+
+    // A panicking handler task never answers: bound the wait so a regression fails, not hangs.
+    let result = tokio::time::timeout(Duration::from_secs(30), rig.login(json!({}))).await??;
+
+    assert_eq!(structured(&result)?["data"]["logged_in"], true);
+    Ok(())
+}
+
+fn record(token: &str) -> String {
+    format!(r#"{{"session_id":"{token}","schema_version":2}}"#)
+}
+
+const OLDER_SESSION: &str = "older-session-0001";
+
+#[tokio::test]
+async fn logging_in_again_signs_the_previous_session_out_after_installing_the_new_one()
+-> anyhow::Result<()> {
+    let rig = Rig::start(Options::new(vec![identifier(), code(CODE)])).await?;
+    std::fs::create_dir_all(rig.dir.path().join("cfg"))?;
+    std::fs::write(rig.own_file(), record(OLDER_SESSION))?;
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_ok(&rig.mock, LOGIN_TOKEN, CODE, 1).await;
+    mount_logout(&rig.mock, OLDER_SESSION, 1).await;
+
+    let result = rig.login(json!({})).await?;
+
+    let value = structured(&result)?;
+    assert_eq!(value["data"]["store"], "file");
+    let notes = value["data"]["notes"].to_string();
+    assert!(
+        notes.contains("previous eero-mcp session was signed out"),
+        "{notes}"
+    );
+    assert_result_clean(&result);
+    assert!(!notes.contains(OLDER_SESSION));
+    assert_eq!(
+        targets_of(&rig.mock).await,
+        [
+            "POST /2.2/login",
+            "POST /2.2/login/verify",
+            "POST /2.2/logout"
+        ]
+    );
+    assert!(std::fs::read_to_string(rig.own_file())?.contains(LOGIN_TOKEN));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_previous_session_the_environment_also_holds_is_not_signed_out() -> anyhow::Result<()> {
+    let rig = Rig::start(
+        Options::new(vec![identifier(), code(CODE)]).env("RUSTEERO_SESSION_TOKEN", OLDER_SESSION),
+    )
+    .await?;
+    std::fs::create_dir_all(rig.dir.path().join("cfg"))?;
+    std::fs::write(rig.own_file(), record(OLDER_SESSION))?;
+    mount_start(&rig.mock, IDENTIFIER, LOGIN_TOKEN, 1).await;
+    mount_verify_ok(&rig.mock, LOGIN_TOKEN, CODE, 1).await;
+
+    let result = rig.login(json!({})).await?;
+
+    let value = structured(&result)?;
+    let notes = value["data"]["notes"].to_string();
+    assert!(!notes.contains("signed out"), "{notes}");
+    assert!(notes.contains("RUSTEERO_SESSION_TOKEN"), "{notes}");
+    assert_eq!(
+        targets_of(&rig.mock).await,
+        ["POST /2.2/login", "POST /2.2/login/verify"],
+        "no sign-out: the environment token is the same session"
+    );
     Ok(())
 }
 

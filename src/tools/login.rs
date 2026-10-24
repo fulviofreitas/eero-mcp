@@ -19,7 +19,11 @@
 //!    JSON string; otherwise the identifier form asks for it.
 //! 5. **The shared driver** ([`crate::auth::run_login`]) runs with an elicitation prompter: typed
 //!    forms with one required text field each, 10 minutes to answer. Each start, resend and
-//!    verify takes one of the server's permits for its duration, never while a form waits.
+//!    verify takes one of the server's permits for its duration, never while a form waits. Every
+//!    start, restarts included, is also taken from the server's start budget (3 per 15 minutes,
+//!    across calls): a call that is cancelled or abandoned releases the lock but not the starts it
+//!    made, so a loop of calls cannot make eero send unlimited messages. When the budget is used
+//!    up the call answers `rate_limited` with fixed text and the wait, and sends nothing.
 //! 6. **Cancellation.** rmcp does not stop a handler when the host cancels the call; it only fires
 //!    the request's cancellation token and drops the response. The whole driver is raced against
 //!    that token: when it fires the in-flight form or request is dropped with the pending login,
@@ -31,7 +35,9 @@
 //!    their tool-call timeout on progress keep the call alive.
 //! 8. **Save and install.** The session is saved to the own store, then installed in the running
 //!    Client under the credential re-read lock. A failed save still installs it and reports
-//!    store `memory` with a note.
+//!    store `memory` with a note. A save that replaced an earlier eero-mcp session then signs the
+//!    old one out at eero (best effort, skipped when another credential source holds the same
+//!    token), after the new one is in use.
 //!
 //! The form contents are the identifier and the one-time code: they are never logged, echoed, or
 //! placed in a result or an error, and the error types of the typed elicitation (whose text can
@@ -50,8 +56,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::auth::{
-    Abort, CodeKind, LoginError, OwnStore, Problem, Prompter, SaveError, StoreKind,
-    normalize_identifier, run_login, save_session,
+    Abort, CodeKind, LoginError, OwnStore, Problem, Prompter, SaveError, StartBudget, StoreKind,
+    normalize_identifier, revoke_replaced, run_login, save_session,
 };
 use crate::credentials::{CredentialChain, Source};
 use crate::errors::{ErrorCode, ToolError};
@@ -63,6 +69,8 @@ use crate::server::EeroMcp;
 pub const FORM_TIMEOUT: Duration = Duration::from_mins(10);
 /// How often a progress notification goes out while a form waits.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
+/// The shortest progress interval accepted: a ticker panics on a zero period.
+pub const MIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(1);
 
 /// What the login tool needs: the own store, the credential chain it reads back through, and the
 /// API base URL (`EERO_MCP_API_BASE_URL`, when set).
@@ -72,6 +80,8 @@ pub struct LoginSupport {
     chain: Arc<CredentialChain>,
     form_timeout: Duration,
     progress_interval: Duration,
+    /// The login starts this server may make, across all its login calls.
+    budget: StartBudget,
 }
 
 impl LoginSupport {
@@ -83,6 +93,7 @@ impl LoginSupport {
             chain,
             form_timeout: FORM_TIMEOUT,
             progress_interval: PROGRESS_INTERVAL,
+            budget: StartBudget::standard(),
         }
     }
 
@@ -95,10 +106,19 @@ impl LoginSupport {
     }
 
     /// Replaces the interval of the progress notifications (tests use a short one; production
-    /// keeps [`PROGRESS_INTERVAL`]).
+    /// keeps [`PROGRESS_INTERVAL`]). An interval shorter than a millisecond, zero included, is
+    /// raised to a millisecond: the ticker that sends the notifications needs a nonzero period.
     #[must_use]
     pub fn with_progress_interval(mut self, interval: Duration) -> Self {
-        self.progress_interval = interval;
+        self.progress_interval = interval.max(MIN_PROGRESS_INTERVAL);
+        self
+    }
+
+    /// Replaces the budget of login starts (tests use a small one; production keeps
+    /// [`StartBudget::standard`]).
+    #[must_use]
+    pub fn with_start_budget(mut self, budget: StartBudget) -> Self {
+        self.budget = budget;
         self
     }
 }
@@ -121,6 +141,8 @@ pub struct LoginParams {
 }
 
 /// The identifier form: one required text field.
+// Not `Debug`, like the code form: the field is the identifier, which must never reach a log line
+// or a panic message. It is wrapped in a secret as soon as the form is read.
 #[derive(Deserialize, JsonSchema)]
 struct IdentifierForm {
     /// The email address or phone number of your eero account.
@@ -129,6 +151,7 @@ struct IdentifierForm {
 elicit_safe!(IdentifierForm);
 
 /// The code form: one required text field, which also takes the word new.
+// Not `Debug`: the field is the one-time code.
 #[derive(Deserialize, JsonSchema)]
 struct CodeForm {
     /// The code eero just sent you, or the word new to get a new code.
@@ -159,12 +182,14 @@ mod text {
     pub const TIMED_OUT: &str =
         "No answer was given within 10 minutes, so the login was cancelled. Nothing was saved.";
     pub const CALL_CANCELLED: &str = "The login call was cancelled. Nothing was saved.";
+    pub const START_BUDGET_USED_UP: &str = "This server has used up its login starts (3 in 15 minutes), so no further one-time code was requested. Nothing was sent to eero. Wait the number of seconds in retry_after_seconds, then call login again, or run the login subcommand of eero-mcp in a terminal.";
     pub const INSTALL_REFUSED: &str =
         "The new session could not be installed in the running server.";
     pub const NOTE_ENV_TOKEN: &str = "RUSTEERO_SESSION_TOKEN is set and takes precedence over the saved login after a restart or a credential re-read.";
     pub const NOTE_EXPLICIT_FILE: &str = "EERO_MCP_SESSION_FILE holds a usable token and takes precedence over the saved login after a restart or a credential re-read.";
     pub const NOTE_NOT_SAVED: &str =
         "The session could not be saved, so it lasts only until the server stops.";
+    pub const NOTE_PREVIOUS_SIGNED_OUT: &str = "The previous eero-mcp session was signed out: a sign-out request was sent to eero (its answer is not reported).";
 }
 
 fn failed(message: &'static str) -> ToolError {
@@ -193,6 +218,13 @@ fn login_error(error: &LoginError) -> ToolError {
         LoginError::RateLimited {
             retry_after_seconds,
         } => ToolError::rate_limited(*retry_after_seconds),
+        LoginError::StartBudgetExhausted {
+            retry_after_seconds,
+        } => {
+            let mut error = ToolError::new(ErrorCode::RateLimited, text::START_BUDGET_USED_UP);
+            error.retry_after_seconds = Some(*retry_after_seconds);
+            error
+        }
         LoginError::Network => ToolError::network(),
         LoginError::Timeout => ToolError::timeout(),
         LoginError::UnusableToken => failed(text::UNUSABLE_TOKEN),
@@ -424,6 +456,7 @@ async fn login_tool(
             identifier,
             &mut prompter,
             Some(server.permits()),
+            &support.budget,
         ) => verified,
     };
     let token = verified.map_err(|error| login_error(&error))?;
@@ -437,13 +470,23 @@ async fn login_tool(
     if !server.install_login_session(&token).await {
         return Err(failed(text::INSTALL_REFUSED));
     }
-    let (store, mut notes) = match saved {
-        Ok(kind) => (kind, Vec::new()),
+    let (store, mut notes, replaced) = match saved {
+        Ok(saved) => (saved.kind, Vec::new(), Some(saved)),
         Err(error) => {
             log_save_failure(error);
-            (StoreKind::Memory, vec![text::NOTE_NOT_SAVED])
+            (StoreKind::Memory, vec![text::NOTE_NOT_SAVED], None)
         }
     };
+    // The new session is in use: end the one it replaced (best effort).
+    if let Some(saved) = replaced
+        && saved.replaced_count() > 0
+        && revoke_replaced(support.api_base_url.as_deref(), &support.chain, saved)
+            .await
+            .revoked
+            > 0
+    {
+        notes.push(text::NOTE_PREVIOUS_SIGNED_OUT);
+    }
     let chain = Arc::clone(&support.chain);
     let higher = tokio::task::spawn_blocking(move || chain.higher_precedence_source())
         .await
