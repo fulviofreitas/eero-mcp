@@ -1,5 +1,7 @@
 # cargo-deny configuration - https://embarkstudios.github.io/cargo-deny/
 [graph]
+# CI checks the full graph, keyring chain included. This setting applies even when the command
+# line also passes --no-default-features, which therefore does not narrow the graph.
 all-features = true
 
 [advisories]

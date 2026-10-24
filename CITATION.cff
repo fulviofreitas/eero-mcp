@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "eero-mcp"
+abstract: "Read-only Model Context Protocol (MCP) server for the eero (Amazon) mesh Wi-Fi cloud API, built on the rusteero Rust client."
+type: software
+authors:
+  - family-names: "Freitas"
+    given-names: "Fulvio"
+url: "https://github.com/fulviofreitas/eero-mcp"
+repository-code: "https://github.com/fulviofreitas/eero-mcp"
+license: MIT
+# Unreleased: no release tag exists yet. The release job rewrites `version` and `date-released`
+# (see .releaserc.json), so both values describe the development version until the first release.
+version: "0.1.0"
+date-released: "2026-10-23"
