@@ -31,7 +31,7 @@ use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt as _};
 use secrecy::SecretString;
 use serde_json::Value;
-use wiremock::matchers::{HeaderExactMatcher, any, header, method, path};
+use wiremock::matchers::{HeaderExactMatcher, any, body_json, body_string, header, method, path};
 use wiremock::{Match, Mock, MockBuilder, MockServer, Request, ResponseTemplate};
 
 /// The session token the harness Client starts with.
@@ -173,6 +173,203 @@ pub async fn build_server(
         .await
         .context("building the rusteero client against the mock")?;
     Ok(EeroMcp::new(eero, resolver))
+}
+
+// ===================== login and logout endpoints =====================
+//
+// What rusteero sends for the login handshake (rusteero 3.0.x), mounted above the write tripwire:
+// start `POST /2.2/login` with form `login=<identifier>` and no credentials; resend
+// `POST /2.2/login/resend` with JSON `{}`; verify `POST /2.2/login/verify` with form
+// `code=<code>`; both authenticated by the login token. Logout `POST /2.2/logout` carries a form
+// whose single field is named `Cookie` and holds `s=<token>`.
+
+/// The login token the first start hands out; the verified session token is the same string.
+pub const LOGIN_TOKEN: &str = "login-token-0001";
+
+/// A second login token, handed out by a restarted login.
+pub const LOGIN_TOKEN_2: &str = "login-token-0002";
+
+/// The synthetic account identifier the login tests use.
+pub const IDENTIFIER: &str = "user@example.com";
+
+/// The synthetic one-time codes the login tests use.
+pub const CODE: &str = "000001";
+pub const CODE_2: &str = "000002";
+
+/// The form body reqwest produces for one field.
+#[must_use]
+pub fn form_body(field: &str, value: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(field, value)
+        .finish()
+}
+
+/// Priority of the login mocks: above the tripwire (`u8::MAX`), so only the exact POSTs a test
+/// mounts get through and everything else still fails the test.
+const LOGIN_PRIORITY: u8 = 1;
+
+fn post(route: &str) -> MockBuilder {
+    Mock::given(method("POST"))
+        .and(path(route))
+        .and(ExactQuery::new(&[]))
+}
+
+fn login_token_headers(builder: MockBuilder, token: &str) -> MockBuilder {
+    builder
+        .and(user_token_header_for(token))
+        .and(session_cookie_for(token))
+}
+
+/// Mounts `builder` (a matcher chain) answering `response`, at most `times` times, expecting
+/// exactly that many requests, above the write tripwire.
+async fn mount_login_mock(
+    mock: &MockServer,
+    builder: MockBuilder,
+    response: ResponseTemplate,
+    times: u64,
+) {
+    builder
+        .respond_with(response)
+        .with_priority(LOGIN_PRIORITY)
+        .up_to_n_times(times)
+        .expect(times)
+        .mount(mock)
+        .await;
+}
+
+/// `POST /2.2/login` for `identifier`: answers with `login_token` (`user_token`), at most `times`
+/// times, and expects exactly that many requests.
+pub async fn mount_start(mock: &MockServer, identifier: &str, login_token: &str, times: u64) {
+    mount_login_mock(
+        mock,
+        post("/2.2/login").and(body_string(form_body("login", identifier))),
+        json_status(
+            200,
+            &serde_json::json!({"meta": {"code": 200}, "data": {"user_token": login_token}}),
+        ),
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/login` for `identifier` answered with an error status: a refused start.
+pub async fn mount_start_error(
+    mock: &MockServer,
+    identifier: &str,
+    status: u16,
+    error: &str,
+    times: u64,
+) {
+    mount_login_mock(
+        mock,
+        post("/2.2/login").and(body_string(form_body("login", identifier))),
+        json_status(
+            status,
+            &serde_json::json!({"meta": {"code": status, "error": error}, "data": {}}),
+        ),
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/login/resend` authenticated by `login_token`, answered 200.
+pub async fn mount_resend(mock: &MockServer, login_token: &str, times: u64) {
+    mount_login_mock(
+        mock,
+        login_token_headers(post("/2.2/login/resend"), login_token)
+            .and(body_json(serde_json::json!({}))),
+        json_status(200, &serde_json::json!({"meta": {"code": 200}, "data": {}})),
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/login/resend` answered with `status`, and `Retry-After` when given.
+pub async fn mount_resend_status(
+    mock: &MockServer,
+    login_token: &str,
+    status: u16,
+    retry_after: Option<&str>,
+    times: u64,
+) {
+    let mut response = json_status(
+        status,
+        &serde_json::json!({"meta": {"code": status}, "data": {}}),
+    );
+    if let Some(seconds) = retry_after {
+        response = response.insert_header("Retry-After", seconds);
+    }
+    mount_login_mock(
+        mock,
+        login_token_headers(post("/2.2/login/resend"), login_token),
+        response,
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/login/verify` with `code`, authenticated by `login_token`: accepted.
+pub async fn mount_verify_ok(mock: &MockServer, login_token: &str, code: &str, times: u64) {
+    mount_login_mock(
+        mock,
+        login_token_headers(post("/2.2/login/verify"), login_token)
+            .and(body_string(form_body("code", code))),
+        json_status(
+            200,
+            &serde_json::json!({"meta": {"code": 200}, "data": {"id": "user-0001"}}),
+        ),
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/login/verify` with `code`, authenticated by `login_token`: refused with `status`
+/// and, when given, eero's `error` code.
+pub async fn mount_verify_error(
+    mock: &MockServer,
+    login_token: &str,
+    code: &str,
+    status: u16,
+    error: Option<&str>,
+    times: u64,
+) {
+    let meta = match error {
+        Some(error) => serde_json::json!({"code": status, "error": error}),
+        None => serde_json::json!({"code": status}),
+    };
+    mount_login_mock(
+        mock,
+        login_token_headers(post("/2.2/login/verify"), login_token)
+            .and(body_string(form_body("code", code))),
+        json_status(status, &serde_json::json!({"meta": meta, "data": {}})),
+        times,
+    )
+    .await;
+}
+
+/// `POST /2.2/logout` for the session `token`: the form field named `Cookie` carries `s=<token>`.
+pub async fn mount_logout(mock: &MockServer, token: &str, times: u64) {
+    mount_login_mock(
+        mock,
+        login_token_headers(post("/2.2/logout"), token)
+            .and(body_string(form_body("Cookie", &format!("s={token}")))),
+        json_status(200, &serde_json::json!({"meta": {"code": 200}, "data": {}})),
+        times,
+    )
+    .await;
+}
+
+/// Every request a mock has received so far as `METHOD /path[?query]`, in arrival order.
+pub async fn targets_of(mock: &MockServer) -> Vec<String> {
+    mock.received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|request| match request.url.query() {
+            Some(query) => format!("{} {}?{query}", request.method, request.url.path()),
+            None => format!("{} {}", request.method, request.url.path()),
+        })
+        .collect()
 }
 
 /// A mock cloud (write tripwire mounted) and a server wired to it, for tests that call the

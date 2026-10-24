@@ -1,9 +1,9 @@
 [package]
 name = "eero-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
-description = "Read-only MCP server for the eero mesh Wi-Fi cloud API, built on rusteero"
+description = "MCP server for the eero mesh Wi-Fi cloud API (read-only network tools, native login), built on rusteero"
 license = "MIT"
 repository = "https://github.com/fulviofreitas/eero-mcp"
 homepage = "https://github.com/fulviofreitas/eero-mcp"
@@ -22,16 +22,17 @@ path = "src/main.rs"
 
 [features]
 default = ["keyring"]
-# Reads the shared OS keyring entry (read-only). Headless builds use `--no-default-features`.
+# Reads the shared OS keyring entry (read-only) and eero-mcp's own entry, and lets login save the
+# session there. Headless builds use `--no-default-features`.
 keyring = ["rusteero/keyring", "dep:keyring"]
 
 [dependencies]
-# Pinned to the v3.0.0 tag (crates.io only has 2.0.0). The explicit version next to the tag keeps
-# cargo-deny's wildcard ban satisfied. Default features off: `keyring` above re-enables its own.
-rusteero = { git = "https://github.com/fulviofreitas/rusteero", tag = "v3.0.0", version = "3.0.0", default-features = false }
+# From crates.io. Default features off: `keyring` above re-enables its own.
+rusteero = { version = "3.0.1", default-features = false }
 # The dependency must be named `rmcp`: its macros refer to the crate by that name.
-rmcp = { version = "3.7", features = ["server", "macros", "schemars", "transport-io"] }
-# Same version as rusteero's, so cargo unifies it. Used only for the raw, read-only entry read.
+rmcp = { version = "3.7", features = ["server", "macros", "schemars", "transport-io", "elicitation"] }
+# Same version as rusteero's, so cargo unifies it. Used only for the raw, read-only entry reads
+# (eero-mcp's own entry and the shared one); writes go through rusteero's keyring store.
 keyring = { version = "4.2", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }

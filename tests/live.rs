@@ -6,6 +6,8 @@
 //!   registered tool list, so no future tool can be swept in by accident.
 //! - Credentials come from the normal read-only resolution chain (the environment, the OS keyring,
 //!   a credential file), exactly as the binary resolves them.
+//! - The login tool and the login, logout and status subcommands are never part of a live run: a
+//!   real login start makes eero send the owner a message.
 //! - Output is limited to result codes, sorted top-level key names and counts: never a body, never
 //!   an identifier. A 200 is not required (accounts without eero Plus legitimately get errors),
 //!   but every result must be a well-formed success or one of the documented error codes
@@ -67,7 +69,8 @@ const LIVE_READS: &[&str] = &[
 ];
 
 /// The error codes the tool contract documents for an upstream outcome. `internal_error` and
-/// `credential_error` are deliberately absent: they signal a defect, not an account state.
+/// `credential_error` are deliberately absent: they signal a defect, not an account state. So are
+/// the three login codes, which no read tool raises.
 const DOCUMENTED_ERROR_CODES: &[&str] = &[
     "authentication_required",
     "access_denied",
@@ -177,13 +180,14 @@ async fn live_read_only_sweep() -> anyhow::Result<()> {
 }
 
 /// Runs in every `cargo test`: the documented set is the server's error codes minus the two that
-/// signal a defect, so a new code cannot be added without deciding whether a live run accepts it.
+/// signal a defect and the three login codes, so a new code cannot be added without deciding
+/// whether a live run accepts it.
 #[test]
-fn the_documented_error_codes_are_the_servers_codes_minus_the_defect_codes() {
+fn the_documented_error_codes_are_the_servers_codes_minus_the_defect_and_login_codes() {
     use eero_mcp::errors::ErrorCode::{
         AccessDenied, AuthenticationRequired, ClientBlocked, CredentialError, FeatureUnavailable,
-        InternalError, InvalidArgument, NetworkError, NotFound, PremiumRequired, RateLimited,
-        Timeout, UpstreamError,
+        InternalError, InvalidArgument, LoginCancelled, LoginFailed, LoginRequiresTerminal,
+        NetworkError, NotFound, PremiumRequired, RateLimited, Timeout, UpstreamError,
     };
     let documented: Vec<&str> = [
         AuthenticationRequired,
@@ -202,8 +206,14 @@ fn the_documented_error_codes_are_the_servers_codes_minus_the_defect_codes() {
     .map(|code| code.as_str())
     .collect();
     assert_eq!(documented, DOCUMENTED_ERROR_CODES);
-    for defect in [InternalError, CredentialError] {
-        assert!(!DOCUMENTED_ERROR_CODES.contains(&defect.as_str()));
+    for excluded in [
+        InternalError,
+        CredentialError,
+        LoginRequiresTerminal,
+        LoginCancelled,
+        LoginFailed,
+    ] {
+        assert!(!DOCUMENTED_ERROR_CODES.contains(&excluded.as_str()));
     }
 }
 
@@ -229,5 +239,7 @@ async fn the_live_allowlist_names_only_registered_tools() -> anyhow::Result<()> 
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted.len(), LIVE_READS.len(), "no duplicates");
+    // A real login start makes eero send the owner a message: the sweep never includes it.
+    assert!(!LIVE_READS.contains(&"login"));
     Ok(())
 }

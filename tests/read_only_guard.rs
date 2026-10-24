@@ -1,11 +1,12 @@
 //! The read-only guard: scans every file under `src/` and fails if the source could issue a write.
 //!
-//! The server's source must be *unable* to issue a write, not merely told not to. Identifier-boundary
-//! matches count wherever they appear, comments included: `src/` never names them. What is banned:
+//! The network tools' source must be *unable* to issue a write, not merely told not to.
+//! Identifier-boundary matches count wherever they appear, comments included: `src/` never names
+//! them. What is banned:
 //!
 //! - every rusteero `Client` / `ClientBuilder` method that is not one of the 40 catalogue reads
 //!   (writes and actions, session and credential-store setters, and the 38 reads that no tool
-//!   exposes), generated from rusteero v3.0.0 and cross-checked against the dependency's real
+//!   exposes), generated from rusteero 3.0.x and cross-checked against the dependency's real
 //!   source by `every_public_client_function_is_classified`;
 //! - the credential-store and login types, and the lower layers that bypass the Client: the
 //!   transport, the endpoint API types, the route and endpoint tables, the storage helpers, the
@@ -15,6 +16,19 @@
 //!   escape-hatch method of the keyring crates are banned, and so is every file-system write and
 //!   every call that changes a file through an open handle (permissions, times, length);
 //! - `Session::from_env` (it reads the real process environment).
+//!
+//! From 0.2.0 one module signs in and out: `src/auth.rs`, the login module. Only there may the
+//! source name rusteero's login flow and pending login, the credential-store types with their
+//! `save` / `clear` (and the blocking-pool adapters `save_async` / `clear_async`), the transport
+//! builder that gives the login flow its base URL, and the Client's `logout`. Each is pinned
+//! further: the keyring store only through `with_entry` carrying eero-mcp's own service and
+//! account constants; the file store, the chained store and the login flow only through their
+//! one constructor; the transport only through its builder, whose `builder` and `base_url` are
+//! used exactly once each; rusteero reached only through the exact paths in
+//! [`AUTH_RUSTEERO_PATHS`]. In `src/auth.rs` the guard also fails on any `load`, the shared
+//! keyring constants, eeroctl's and the explicit file's settings, and the in-memory store, the
+//! storage factory and its configuration; and the unit-test module of `src/auth.rs` may not name
+//! a store or a mock server (those tests live in `tests/auth.rs`).
 //!
 //! The names without an underscore (`logout`, `store`) count when they are called, called with a
 //! turbofish, or reached through a path (`Client::logout` taken as a function value).
@@ -32,14 +46,14 @@
 //!   as a function value), for the credential re-read. It changes in-memory state only, because no
 //!   store is attached.
 //!
-//! The banned lists are generated from rusteero v3.0.0's `Client` (`src/client/*.rs`): every public
+//! The banned lists are generated from rusteero 3.0.x's `Client` (`src/client/*.rs`): every public
 //! function that is not one of its 78 reads, minus the read-only accessors and harmless builder
 //! setters; plus the 38 reads that are not part of the 40-tool catalogue. After a rusteero bump the
 //! drift test names every function that needs classifying; the lists are regenerated with:
 //!
 //! ```text
-//! for f in $(git -C <rusteero> ls-tree --name-only v3.0.0 src/client/); do
-//!   git -C <rusteero> show "v3.0.0:$f" | grep -oE 'pub (async )?fn [a-z0-9_]+'
+//! for f in $(git -C <rusteero> ls-tree --name-only v3.0.1 src/client/); do
+//!   git -C <rusteero> show "v3.0.1:$f" | grep -oE 'pub (async )?fn [a-z0-9_]+'
 //! done | awk '{print $NF}' | sort -u
 //! ```
 
@@ -48,7 +62,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Every non-read `Client` and `ClientBuilder` method of rusteero v3.0.0 (the pinned
+/// Every non-read `Client` and `ClientBuilder` method of rusteero 3.0.x (the pinned
 /// session-token setter and the read-only accessors excluded).
 const WRITE_AND_ACTION_METHODS: &[&str] = &[
     "add_backup_access_point",
@@ -183,7 +197,7 @@ const WRITE_AND_ACTION_METHODS: &[&str] = &[
     "verify_account_phone",
 ];
 
-/// The 38 reads of rusteero v3.0.0 that are not among the 40 catalogue tools: never called.
+/// The 38 reads of rusteero 3.0.x that are not among the 40 catalogue tools: never called.
 const UNEXPOSED_READS: &[&str] = &[
     "discover_backup_ssids",
     "get_ac_compat",
@@ -386,13 +400,90 @@ const ALLOWED_RUSTEERO_PATHS: &[&str] = &[
     "rusteero::storage::keyring::ACCOUNT_NAME",
 ];
 
-/// The only file-system items non-test code may use: reading one regular file.
+/// The only file-system items non-test code may use: reading one regular file, and resolving
+/// paths (`canonicalize` is a read: the check that the explicit credential file is not the own
+/// file).
 const ALLOWED_FS_PATHS: &[&str] = &[
     "fs::read_to_string",
     "fs::metadata",
     "fs::File::open",
     "fs::File",
+    "fs::canonicalize",
 ];
+
+/// The login module: the only file that may name the login and credential-write items below.
+const AUTH_FILE: &str = "src/auth.rs";
+
+/// Types that only [`AUTH_FILE`] may name, each with the one path through which it may be used
+/// (`Type::item`); a bare mention (an import, a type annotation) is fine there.
+const AUTH_CONSTRUCTORS: &[(&str, &str)] = &[
+    ("KeyringStore", "KeyringStore::with_entry"),
+    ("FileStore", "FileStore::new"),
+    ("ChainedStore", "ChainedStore::new"),
+    ("LoginFlow", "LoginFlow::with_transport"),
+    ("Transport", "Transport::builder"),
+    // Taken only as a type, never constructed.
+    ("PendingLogin", "PendingLogin"),
+    ("CredentialStore", "CredentialStore"),
+];
+
+/// Banned functions that [`AUTH_FILE`] may use: the blocking-pool adapters of the stores' save and
+/// clear.
+const AUTH_ONLY_FUNCTIONS: &[&str] = &["save_async", "clear_async"];
+
+/// The Client's sign-out call: allowed in [`AUTH_FILE`] only.
+const AUTH_ONLY_METHODS: &[&str] = &["logout"];
+
+/// The rusteero paths [`AUTH_FILE`] may import, each matched exactly (single or grouped): the
+/// login flow and pending login live in the flow submodule of rusteero's auth module (its only
+/// public path); the transport type comes from rusteero's transport module; the blocking-pool
+/// adapters from rusteero's storage module. The store types and the storage error come from the
+/// crate root, which the banned-module rule does not touch.
+const AUTH_RUSTEERO_PATHS: &[&str] = &[
+    "rusteero::auth::flow::LoginFlow",
+    "rusteero::auth::flow::PendingLogin",
+    "rusteero::transport::Transport",
+    "rusteero::storage::save_async",
+    "rusteero::storage::clear_async",
+];
+
+/// Names [`AUTH_FILE`] may never use, on top of everything banned everywhere: a store load, the
+/// shared keyring's constants, eeroctl's file location and the explicit credential file's
+/// setting. The own store is written from `src/auth.rs` and read by `src/credentials.rs`; the
+/// shared stores and the explicit file are never handed to a writing store.
+const AUTH_BANNED_NAMES: &[&str] = &[
+    "load",
+    // The Client builder: a base URL set on it would decide where the session token goes.
+    "client_builder",
+    "SERVICE_NAME",
+    "ACCOUNT_NAME",
+    "session_file",
+    "default_session_file",
+    "SESSION_FILE_VAR",
+    "EEROCTL_CONFIG_DIR_VAR",
+    "COOKIES_FILE",
+];
+
+/// The own keyring names, which every `KeyringStore::with_entry` call in [`AUTH_FILE`] must carry.
+const OWN_KEYRING_CONSTANTS: &[&str] = &["OWN_KEYRING_SERVICE", "OWN_KEYRING_ACCOUNT"];
+
+/// What the unit-test module of [`AUTH_FILE`] may not name: the guard scans that file whole, so
+/// its tests are the pure rules only.
+const AUTH_TEST_MODULE_BANNED: &[&str] = &[
+    "FileStore",
+    "KeyringStore",
+    "ChainedStore",
+    "CredentialStore",
+    "MemoryStore",
+    "LoginFlow",
+    "PendingLogin",
+    "MockServer",
+    "wiremock",
+    "tempfile",
+];
+
+/// The transport builder's two calls, pinned to [`AUTH_FILE`], exactly once each.
+const TRANSPORT_PINNED_ITEMS: &[&str] = &["builder", "base_url"];
 
 /// Names that are ordinary English words or generic identifiers on their own: only a call or
 /// definition (`name(`) counts, so prose in comments does not trip the guard. Every other banned
@@ -561,13 +652,26 @@ fn scan(path: &str, text: &str) -> Vec<Finding> {
     scan_session_setter(&mut report);
     scan_client_construction(&mut report);
     scan_api_accessor(&mut report);
+    scan_auth_file(&mut report);
     report.findings
+}
+
+/// Whether `name` is one of the items [`AUTH_FILE`] alone may name (and `path` is that file). The
+/// constructors and paths of the types are pinned separately by [`scan_auth_file`].
+fn auth_exempt(path: &str, name: &str) -> bool {
+    path == AUTH_FILE
+        && (AUTH_CONSTRUCTORS.iter().any(|(ty, _)| *ty == name)
+            || AUTH_ONLY_FUNCTIONS.contains(&name)
+            || AUTH_ONLY_METHODS.contains(&name))
 }
 
 /// Rusteero methods, credential-store types and the lower-layer functions.
 fn scan_banned_names(report: &mut Report<'_>) {
     let text = report.text;
     for name in WRITE_AND_ACTION_METHODS.iter().chain(UNEXPOSED_READS) {
+        if auth_exempt(report.path, name) {
+            continue;
+        }
         for offset in ident_matches(text, name) {
             if call_only(name) && !is_used(text, offset, name.len()) {
                 continue;
@@ -579,6 +683,9 @@ fn scan_banned_names(report: &mut Report<'_>) {
         }
     }
     for name in BANNED_TYPES.iter().chain(BANNED_IDENTS) {
+        if auth_exempt(report.path, name) {
+            continue;
+        }
         for offset in ident_matches(text, name) {
             report.at(
                 offset,
@@ -589,6 +696,9 @@ fn scan_banned_names(report: &mut Report<'_>) {
         }
     }
     for name in BANNED_FUNCTIONS {
+        if auth_exempt(report.path, name) {
+            continue;
+        }
         for offset in ident_matches(text, name) {
             report.at(
                 offset,
@@ -596,6 +706,34 @@ fn scan_banned_names(report: &mut Report<'_>) {
             );
         }
     }
+}
+
+/// The concrete paths a (possibly grouped) path names: `a::b::{c, d}` is `a::b::c` and `a::b::d`.
+/// A path without a group is its own single expansion.
+fn expand_group(path_text: &str) -> Vec<String> {
+    match path_text.split_once("::{") {
+        Some((prefix, group)) => group
+            .trim_end_matches('}')
+            .split(',')
+            .filter(|item| !item.is_empty())
+            .map(|item| format!("{prefix}::{item}"))
+            .collect(),
+        None => vec![path_text.to_owned()],
+    }
+}
+
+/// Whether `path_text` (every member of a group) is one of the paths `file` may use through a
+/// banned rusteero module.
+fn rusteero_path_allowed(file: &str, path_text: &str) -> bool {
+    expand_group(path_text).iter().all(|path| {
+        ALLOWED_RUSTEERO_PATHS
+            .iter()
+            .any(|allowed| path_allowed(path, allowed))
+            || (file == AUTH_FILE
+                && AUTH_RUSTEERO_PATHS
+                    .iter()
+                    .any(|allowed| path_allowed(path, allowed)))
+    })
 }
 
 /// Paths below the Client (`rusteero::<module>::...`, grouped imports) and `Session::from_env`.
@@ -620,9 +758,7 @@ fn scan_rusteero_paths(report: &mut Report<'_>) {
             .and_then(|rest| rest.split("::").next())
             .unwrap_or_default();
         if BANNED_RUSTEERO_MODULES.contains(&module)
-            && !ALLOWED_RUSTEERO_PATHS
-                .iter()
-                .any(|allowed| path_allowed(&path_text, allowed))
+            && !rusteero_path_allowed(report.path, &path_text)
         {
             report.at(
                 offset,
@@ -774,7 +910,24 @@ fn scan_client_construction(report: &mut Report<'_>) {
             .into_iter()
             .filter(|&offset| is_used(text, offset, name.len()))
             .collect();
-        if report.path != CLIENT_BUILD_FILE {
+        if report.path == CLIENT_BUILD_FILE {
+            if *name == ORIGIN_SETTER && uses.len() > 1 {
+                report.at(
+                    uses[1],
+                    format!("`{name}` may be applied exactly once in {CLIENT_BUILD_FILE}"),
+                );
+            }
+        } else if report.path == AUTH_FILE && TRANSPORT_PINNED_ITEMS.contains(name) {
+            // The login flow's transport builder: its builder call and base URL, once each.
+            if uses.len() > 1 {
+                report.at(
+                    uses[1],
+                    format!(
+                        "`{name}` may be used exactly once in {AUTH_FILE} (the login transport)"
+                    ),
+                );
+            }
+        } else {
             for offset in uses {
                 report.at(
                     offset,
@@ -784,11 +937,6 @@ fn scan_client_construction(report: &mut Report<'_>) {
                     ),
                 );
             }
-        } else if *name == ORIGIN_SETTER && uses.len() > 1 {
-            report.at(
-                uses[1],
-                format!("`{name}` may be applied exactly once in {CLIENT_BUILD_FILE}"),
-            );
         }
     }
 }
@@ -818,6 +966,97 @@ fn scan_api_accessor(report: &mut Report<'_>) {
                 accessors.len()
             ),
         );
+    }
+}
+
+/// The text of the parenthesised arguments that start at the first `(` after `from`.
+fn call_arguments(text: &str, from: usize) -> &str {
+    let rest = &text[from..];
+    let Some(open) = rest.find('(') else {
+        return "";
+    };
+    let mut depth = 0usize;
+    for (index, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + index];
+                }
+            }
+            _ => {}
+        }
+    }
+    &rest[open + 1..]
+}
+
+/// The login module's own pins: each store, the login flow and the transport only through their
+/// one constructor; the keyring store only with eero-mcp's own names; and none of the names that
+/// would let it touch a shared or explicit credential, load a store, or use the in-memory store
+/// in its unit tests.
+fn scan_auth_file(report: &mut Report<'_>) {
+    if report.path != AUTH_FILE {
+        return;
+    }
+    let text = report.text;
+    for (ty, allowed) in AUTH_CONSTRUCTORS {
+        for offset in ident_matches(text, ty) {
+            let path_text = path_from(text, offset);
+            if path_text.starts_with(&format!("{ty}::")) && !path_allowed(&path_text, allowed) {
+                report.at(
+                    offset,
+                    format!("`{path_text}`: {AUTH_FILE} may use `{allowed}` only"),
+                );
+            }
+        }
+    }
+    for offset in ident_matches(text, "KeyringStore") {
+        if !path_from(text, offset).starts_with("KeyringStore::with_entry") {
+            continue;
+        }
+        let arguments = call_arguments(text, offset);
+        for constant in OWN_KEYRING_CONSTANTS {
+            if !ident_matches(arguments, constant).is_empty() {
+                continue;
+            }
+            report.at(
+                offset,
+                format!("`KeyringStore::with_entry` must be given eero-mcp's own `{constant}`"),
+            );
+        }
+    }
+    // The builder call must be the transport's, never the Client's.
+    for offset in ident_matches(text, "builder") {
+        if is_used(text, offset, "builder".len())
+            && !text[..offset].trim_end().ends_with("Transport::")
+        {
+            report.at(
+                offset,
+                format!("`builder` in {AUTH_FILE} may be `Transport::builder` only"),
+            );
+        }
+    }
+    for name in AUTH_BANNED_NAMES {
+        for offset in ident_matches(text, name) {
+            if call_only(name) && !is_used(text, offset, name.len()) {
+                continue;
+            }
+            report.at(
+                offset,
+                format!("`{name}` is not allowed in {AUTH_FILE}: it would load a store, or reach a shared or explicit credential"),
+            );
+        }
+    }
+    if let Some(start) = test_module_start(text) {
+        for name in AUTH_TEST_MODULE_BANNED {
+            for offset in ident_matches(&text[start..], name) {
+                report.at(
+                    start + offset,
+                    format!("`{name}` in the unit tests of {AUTH_FILE}: those tests belong in tests/auth.rs"),
+                );
+            }
+        }
     }
 }
 
@@ -913,6 +1152,30 @@ fn both_pinned_exceptions_exist_where_they_are_allowed() {
         uses_of("builder") >= 1 && uses_of("session") >= 1,
         "the Client is built and its session read in {CLIENT_BUILD_FILE}"
     );
+    // The login module's pins: one transport builder call, one base URL, the Client's sign-out,
+    // and the keyring store only with eero-mcp's own names.
+    let auth = fs::read_to_string(root.join(AUTH_FILE)).expect("auth.rs");
+    let auth_uses = |name: &str| {
+        ident_matches(&auth, name)
+            .into_iter()
+            .filter(|&offset| is_used(&auth, offset, name.len()))
+            .count()
+    };
+    for name in TRANSPORT_PINNED_ITEMS {
+        assert_eq!(
+            auth_uses(name),
+            1,
+            "`{name}` (the login transport) is used exactly once in {AUTH_FILE}"
+        );
+    }
+    assert!(
+        auth_uses("logout") >= 1,
+        "the Client's sign-out is called in {AUTH_FILE}, the only place it may be"
+    );
+    assert!(
+        auth_uses("with_entry") >= 1,
+        "{AUTH_FILE} builds the own keyring store"
+    );
     let ids = fs::read_to_string(root.join(API_CHAIN_FILE)).expect("ids.rs");
     let compact: String = ids.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(
@@ -949,7 +1212,7 @@ fn the_lists_are_consistent() {
     assert_eq!(
         CATALOGUE_READS.len() + UNEXPOSED_READS.len(),
         78,
-        "rusteero v3.0.0 has 78 reads"
+        "rusteero 3.0.x has 78 reads"
     );
     assert_eq!(ALLOWED_CLIENT_ITEMS.len(), 15);
     for read in CATALOGUE_READS.iter().chain(UNEXPOSED_READS) {
@@ -1505,4 +1768,213 @@ fn findings_carry_file_and_line() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].file, "src/x.rs");
     assert_eq!(found[0].line, 3);
+}
+
+// ===================== the login module =====================
+
+/// Snippets only `src/auth.rs` may contain, each as it appears in that file.
+const AUTH_ONLY_SNIPPETS: &[&str] = &[
+    "use rusteero::auth::flow::{LoginFlow, PendingLogin};",
+    "use rusteero::auth::flow::LoginFlow;",
+    "use rusteero::transport::Transport;",
+    "use rusteero::storage::{clear_async, save_async};",
+    "use rusteero::{ChainedStore, CredentialStore, FileStore, KeyringStore};",
+    "let flow = LoginFlow::with_transport(transport);",
+    "let mut b = Transport::builder();",
+    "let b = b.base_url(url);",
+    "let store = FileStore::new(path);",
+    "let store = ChainedStore::new(primary, fallback);",
+    "let store = KeyringStore::with_entry(OWN_KEYRING_SERVICE, OWN_KEYRING_ACCOUNT).warn_on_unpersisted(false);",
+    "save_async(store, session).await?;",
+    "clear_async(store).await?;",
+    "client.logout().await",
+    "let backend: Arc<dyn CredentialStore> = backend;",
+    "fn pending(p: &PendingLogin) {}",
+];
+
+#[test]
+fn the_login_module_may_name_its_items_and_no_other_file_may() {
+    for allowed in AUTH_ONLY_SNIPPETS {
+        assert_eq!(
+            findings(AUTH_FILE, allowed),
+            Vec::<String>::new(),
+            "{allowed}"
+        );
+        for elsewhere in [
+            "src/x.rs",
+            "src/server.rs",
+            "src/cli.rs",
+            "src/credentials.rs",
+            "src/tools/login.rs",
+            "src/main.rs",
+        ] {
+            // server.rs applies the Client's own base URL, once.
+            if elsewhere == "src/server.rs" && allowed.contains("base_url(") {
+                continue;
+            }
+            assert!(
+                !findings(elsewhere, allowed).is_empty(),
+                "{elsewhere} must not contain: {allowed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_login_modules_constructors_are_the_only_way_in() {
+    for sneaky in [
+        // The shared keyring entry and rusteero's own service constant.
+        "let s = KeyringStore::new();",
+        "let s = KeyringStore::with_entry(\"eero-api\", \"auth-tokens\");",
+        "let s = KeyringStore::with_entry(SERVICE_NAME, ACCOUNT_NAME);",
+        "let s = KeyringStore::with_entry(OWN_KEYRING_SERVICE, \"auth-tokens\");",
+        "let s = KeyringStore::with_entry(\"eero-mcp\", OWN_KEYRING_ACCOUNT);",
+        "let s = KeyringStore::default();",
+        "use rusteero::storage::keyring::SERVICE_NAME;",
+        // A login flow on the real hosts.
+        "let f = LoginFlow::new(None)?;",
+        // Anything but the one constructor, and any load.
+        "let s = FileStore::default();",
+        "let s = FileStore::from(p);",
+        "let s = ChainedStore::default();",
+        "let session = store.load()?;",
+        "let session = load_async(store).await?;",
+        "let s = MemoryStore::new();",
+        "use rusteero::MemoryStore;",
+        "let s = create_storage(&config);",
+        "let c = StorageConfig::default();",
+        "let b = TransportBuilder::default();",
+        "use rusteero::transport::TransportBuilder;",
+        "let t = Transport::request(a, b);",
+        // Paths below the Client other than the exact ones.
+        "use rusteero::storage::{save_async, load_async};",
+        "use rusteero::storage::load_async;",
+        "use rusteero::auth::flow::{LoginFlow, SomethingElse};",
+        "use rusteero::auth::AuthApi;",
+        "use rusteero::client::Client;",
+        "use rusteero::storage::keyring::KeyringStore;",
+        "use rusteero::endpoints::events::SOMETHING_ELSE;",
+        // The shared and explicit credentials, and eeroctl's file, are never handed over.
+        "let p = settings.session_file.clone();",
+        "let p = settings.default_session_file.clone();",
+        "let p = SESSION_FILE_VAR;",
+        "let p = EEROCTL_CONFIG_DIR_VAR;",
+        "let p = COOKIES_FILE;",
+        // Still banned everywhere, the login module included.
+        "client.set_dhcp(true).await;",
+        "client.set_session_token(t).await;",
+        "let s = Session::from_env(\"X\");",
+        "std::fs::write(p, d)?;",
+        "client.api().devices()",
+    ] {
+        assert!(
+            !findings(AUTH_FILE, sneaky).is_empty(),
+            "{AUTH_FILE} must not contain: {sneaky}"
+        );
+    }
+    // Prose naming a load is fine; a call is not.
+    assert!(
+        findings(
+            AUTH_FILE,
+            "// the loader never runs; nothing here loads a store"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn the_login_transports_builder_and_base_url_are_used_once_each_in_the_login_module_only() {
+    let once = "let mut b = Transport::builder(); b = b.base_url(url); b.build()";
+    assert_eq!(findings(AUTH_FILE, once), Vec::<String>::new());
+    assert!(!findings("src/server.rs", once).is_empty());
+    assert!(!findings(AUTH_FILE, &format!("{once}; {once}")).is_empty());
+    assert!(
+        !findings(
+            AUTH_FILE,
+            "let a = Transport::builder(); let b = Transport::builder();"
+        )
+        .is_empty()
+    );
+    assert!(!findings(AUTH_FILE, "b.base_url(one); b.base_url(two);").is_empty());
+    // The Client's session accessor, builder and builder factory stay out of the login module.
+    for sneaky in [
+        "client.session()",
+        "Client::builder()",
+        "client_builder(url, token).build()",
+        "client_builder(url, token).base_url(other)",
+    ] {
+        assert!(!findings(AUTH_FILE, sneaky).is_empty(), "{sneaky}");
+    }
+    // Client construction in server.rs is unaffected by the transport pins.
+    assert!(findings("src/server.rs", "Client::builder().base_url(u).session(s)").is_empty());
+}
+
+#[test]
+fn the_login_modules_unit_tests_may_not_name_a_store_or_a_mock_server() {
+    let clean = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { let _ = 1; }\n}\n";
+    assert_eq!(findings(AUTH_FILE, clean), Vec::<String>::new());
+    for name in AUTH_TEST_MODULE_BANNED {
+        let source = format!(
+            "fn f() {{}}\n#[cfg(test)]\nmod tests {{\n    fn t() {{ let _ = {name}; }}\n}}\n"
+        );
+        assert!(
+            !findings(AUTH_FILE, &source).is_empty(),
+            "{name} in the login module's unit tests"
+        );
+    }
+    // Other files' unit tests are not held to this rule.
+    let other =
+        "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { let _ = tempfile::tempdir(); }\n}\n";
+    assert_eq!(findings("src/credentials.rs", other), Vec::<String>::new());
+}
+
+#[test]
+fn grouped_paths_expand_member_by_member() {
+    assert_eq!(
+        expand_group("rusteero::auth::flow::{LoginFlow,PendingLogin}"),
+        [
+            "rusteero::auth::flow::LoginFlow",
+            "rusteero::auth::flow::PendingLogin"
+        ]
+    );
+    assert_eq!(
+        expand_group("rusteero::routes::ApiVersion"),
+        ["rusteero::routes::ApiVersion"]
+    );
+    assert!(rusteero_path_allowed(
+        AUTH_FILE,
+        "rusteero::storage::{clear_async,save_async}"
+    ));
+    assert!(!rusteero_path_allowed(
+        AUTH_FILE,
+        "rusteero::storage::{clear_async,load_async}"
+    ));
+    assert!(!rusteero_path_allowed(
+        "src/x.rs",
+        "rusteero::storage::{clear_async,save_async}"
+    ));
+    // The pre-existing grouped exception still passes everywhere.
+    assert!(rusteero_path_allowed(
+        "src/credentials.rs",
+        "rusteero::storage::keyring::{ACCOUNT_NAME,SERVICE_NAME}"
+    ));
+}
+
+#[test]
+fn canonicalising_a_path_is_a_read_and_the_rest_of_the_file_system_stays_banned() {
+    assert_eq!(
+        findings("src/credentials.rs", "let c = std::fs::canonicalize(p)?;"),
+        Vec::<String>::new()
+    );
+    for sneaky in [
+        "std::fs::copy(a, b)?;",
+        "std::fs::create_dir_all(p)?;",
+        "std::fs::hard_link(a, b)?;",
+        "std::fs::symlink_metadata_and_write(p)?;",
+    ] {
+        assert!(
+            !findings("src/credentials.rs", sneaky).is_empty(),
+            "{sneaky}"
+        );
+    }
 }

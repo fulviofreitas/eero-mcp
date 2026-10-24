@@ -1,4 +1,4 @@
-eero-mcp - a read-only MCP server for the eero mesh Wi-Fi cloud API
+eero-mcp - an MCP server for the eero mesh Wi-Fi cloud API (read-only network tools, native login)
 Copyright (c) 2026 Fulvio Freitas. Licensed under the MIT License (see LICENSE).
 
 Lineage and attribution

@@ -1,4 +1,4 @@
-//! The seven tool groups, each its own rmcp tool router, merged into the server's router. The
+//! The eight tool groups, each its own rmcp tool router, merged into the server's router. The
 //! merged router lists tools sorted by name.
 //!
 //! | Module | Tools |
@@ -10,6 +10,7 @@
 //! | [`health`] | 19 to 25 |
 //! | [`network_config`] | 26 to 32 |
 //! | [`usage`] | 33 to 40 |
+//! | [`login`] | 41 (not read-only: signs in through MCP elicitation) |
 //!
 //! Adding a tool touches only its group module: write the handler inside that module's
 //! `#[tool_router]` impl block, following [`account`].
@@ -78,11 +79,12 @@ pub mod account;
 pub mod devices;
 pub mod eeros;
 pub mod health;
+pub mod login;
 pub mod network_config;
 pub mod profiles;
 pub mod usage;
 
-/// All seven group routers merged into one.
+/// All eight group routers merged into one.
 ///
 /// Descriptions come from wrapped doc comments, whose line breaks schemars keeps; they are joined
 /// here, once, for every tool and every schema.
@@ -93,7 +95,8 @@ pub(crate) fn router() -> ToolRouter<EeroMcp> {
         + EeroMcp::profiles_router()
         + EeroMcp::health_router()
         + EeroMcp::network_config_router()
-        + EeroMcp::usage_router();
+        + EeroMcp::usage_router()
+        + EeroMcp::login_router();
     for route in router.map.values_mut() {
         tidy(&mut route.attr);
     }
