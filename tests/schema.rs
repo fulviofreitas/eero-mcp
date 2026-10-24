@@ -3,8 +3,8 @@
 //! title, a description, an `outputSchema`, and portable input schemas (object root, no unknown
 //! fields, no type arrays, no `default` keyword, every property described). Plus the server info.
 //!
-//! The exact tool count is deliberately not asserted yet: tools are added group by group. Every
-//! registered name must belong to the 40-tool catalogue below, which catches typos and strays.
+//! The registered tools must be exactly the 40-tool catalogue below: no stray, no duplicate and no
+//! missing tool.
 
 mod common;
 
@@ -113,7 +113,7 @@ fn walk(path: &str, schema: &Value, visit: &mut impl FnMut(&str, &Map<String, Va
 // ===================== the registered tools =====================
 
 #[tokio::test]
-async fn every_registered_tool_belongs_to_the_catalogue_once() -> anyhow::Result<()> {
+async fn the_registered_tools_are_exactly_the_catalogue() -> anyhow::Result<()> {
     let (_h, tools) = tools().await?;
     assert!(!tools.is_empty());
     let mut seen = std::collections::BTreeSet::new();
@@ -133,6 +133,12 @@ async fn every_registered_tool_belongs_to_the_catalogue_once() -> anyhow::Result
     let mut sorted = names.clone();
     sorted.sort_unstable();
     assert_eq!(names, sorted, "tools are listed sorted by name");
+    let mut catalogue = CATALOGUE.to_vec();
+    catalogue.sort_unstable();
+    assert_eq!(
+        names, catalogue,
+        "the registered tools are exactly the 40 catalogue tools"
+    );
     Ok(())
 }
 
