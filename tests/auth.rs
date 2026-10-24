@@ -1025,6 +1025,9 @@ async fn logout_names_the_stores_it_could_not_check() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Unix only: Windows reports a path through a regular file as not found, so the record reads as
+// absent there rather than unreadable.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_record_that_cannot_be_deleted_fails_the_logout() -> anyhow::Result<()> {
     let fx = Fixture::new().await;
