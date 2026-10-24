@@ -1,9 +1,10 @@
 //! The published tool surface, checked generically over *every* registered tool, so a tool added
-//! by any group is held to the same rules without touching this file: read-only annotations, a
-//! title, a description, an `outputSchema`, and portable input schemas (object root, no unknown
-//! fields, no type arrays, no `default` keyword, every property described). Plus the server info.
+//! by any group is held to the same rules without touching this file: a title, a description, an
+//! `outputSchema`, and portable input schemas (object root, no unknown fields, no type arrays, no
+//! `default` keyword, every property described). The 40 read tools are annotated read-only; the
+//! `login` tool (41, from 0.2.0) has its own annotations. Plus the server info.
 //!
-//! The registered tools must be exactly the 40-tool catalogue below: no stray, no duplicate and no
+//! The registered tools must be exactly the 41-tool catalogue below: no stray, no duplicate and no
 //! missing tool.
 
 mod common;
@@ -13,8 +14,11 @@ use rmcp::model::{CallToolRequestParams, ErrorCode, ProtocolVersion, Tool};
 use rmcp::{ServiceError, object};
 use serde_json::{Map, Value, json};
 
-/// The 40 catalogue tools, by number.
-const CATALOGUE: [&str; 40] = [
+/// The tool that signs in: the only one that is not read-only.
+const LOGIN: &str = "login";
+
+/// The 40 read tools, by number.
+const READ_CATALOGUE: [&str; 40] = [
     "get_account",
     "list_networks",
     "get_network",
@@ -69,6 +73,13 @@ const CACHED: [&str; 8] = [
     "get_profile",
 ];
 
+/// All 41 tool names: the 40 read tools and `login`.
+fn catalogue() -> Vec<&'static str> {
+    let mut names = READ_CATALOGUE.to_vec();
+    names.push(LOGIN);
+    names
+}
+
 async fn tools() -> anyhow::Result<(Harness, Vec<Tool>)> {
     let h = Harness::start().await?;
     let tools = h.client.list_all_tools().await?;
@@ -117,9 +128,10 @@ async fn the_registered_tools_are_exactly_the_catalogue() -> anyhow::Result<()> 
     let (_h, tools) = tools().await?;
     assert!(!tools.is_empty());
     let mut seen = std::collections::BTreeSet::new();
+    let all = catalogue();
     for tool in &tools {
         assert!(
-            CATALOGUE.contains(&tool.name.as_ref()),
+            all.contains(&tool.name.as_ref()),
             "{} is not a catalogue tool",
             tool.name
         );
@@ -133,44 +145,76 @@ async fn the_registered_tools_are_exactly_the_catalogue() -> anyhow::Result<()> 
     let mut sorted = names.clone();
     sorted.sort_unstable();
     assert_eq!(names, sorted, "tools are listed sorted by name");
-    let mut catalogue = CATALOGUE.to_vec();
-    catalogue.sort_unstable();
+    let mut expected = catalogue();
+    expected.sort_unstable();
     assert_eq!(
-        names, catalogue,
-        "the registered tools are exactly the 40 catalogue tools"
+        names, expected,
+        "the registered tools are exactly the 41 catalogue tools"
     );
+    assert_eq!(names.len(), 41);
     Ok(())
 }
 
 #[tokio::test]
-async fn every_tool_is_annotated_read_only_with_a_title_and_a_description() -> anyhow::Result<()> {
+async fn every_read_tool_is_annotated_read_only_and_every_tool_has_a_title_and_a_description()
+-> anyhow::Result<()> {
     let (_h, tools) = tools().await?;
+    assert_eq!(
+        tools.iter().filter(|tool| tool.name != LOGIN).count(),
+        40,
+        "40 read tools"
+    );
     for tool in &tools {
         let name = &tool.name;
         let annotations = tool
             .annotations
             .as_ref()
             .unwrap_or_else(|| panic!("{name}: no annotations"));
-        assert_eq!(
-            annotations.read_only_hint,
-            Some(true),
-            "{name}: readOnlyHint"
-        );
-        assert_eq!(
-            annotations.destructive_hint,
-            Some(false),
-            "{name}: destructiveHint"
-        );
-        assert_eq!(
-            annotations.idempotent_hint,
-            Some(true),
-            "{name}: idempotentHint"
-        );
-        assert_eq!(
-            annotations.open_world_hint,
-            Some(true),
-            "{name}: openWorldHint"
-        );
+        if tool.name == LOGIN {
+            // Signing in sends eero's login requests and saves a session: not read-only, but it
+            // deletes nothing, may be repeated with a different outcome, and talks to the world.
+            assert_eq!(
+                annotations.read_only_hint,
+                Some(false),
+                "{name}: readOnlyHint"
+            );
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(false),
+                "{name}: destructiveHint"
+            );
+            assert_eq!(
+                annotations.idempotent_hint,
+                Some(false),
+                "{name}: idempotentHint"
+            );
+            assert_eq!(
+                annotations.open_world_hint,
+                Some(true),
+                "{name}: openWorldHint"
+            );
+        } else {
+            assert_eq!(
+                annotations.read_only_hint,
+                Some(true),
+                "{name}: readOnlyHint"
+            );
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(false),
+                "{name}: destructiveHint"
+            );
+            assert_eq!(
+                annotations.idempotent_hint,
+                Some(true),
+                "{name}: idempotentHint"
+            );
+            assert_eq!(
+                annotations.open_world_hint,
+                Some(true),
+                "{name}: openWorldHint"
+            );
+        }
         let title = tool.title.as_deref().unwrap_or_default();
         assert!(title.len() >= 4, "{name}: title");
         assert_eq!(
@@ -192,6 +236,53 @@ async fn every_tool_is_annotated_read_only_with_a_title_and_a_description() -> a
             "{name}: descriptions are published to agents as plain text, no backticks"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_login_tool_is_published_as_documented() -> anyhow::Result<()> {
+    let (_h, tools) = tools().await?;
+    let login = tools
+        .iter()
+        .find(|tool| tool.name == LOGIN)
+        .expect("login is registered");
+    assert_eq!(login.title.as_deref(), Some("Log in to eero"));
+    let description = login.description.as_deref().unwrap_or_default();
+    for needle in [
+        "one-time code",
+        "never through arguments",
+        "only when the owner asks",
+        "typed it in this conversation",
+        "login_requires_terminal",
+        "login subcommand",
+    ] {
+        assert!(
+            description.contains(needle),
+            "description mentions {needle}"
+        );
+    }
+
+    let input = schema_value(&login.input_schema);
+    let properties = input["properties"].as_object().expect("properties");
+    assert_eq!(
+        properties.keys().collect::<Vec<_>>(),
+        ["identifier"],
+        "one optional input, no refresh and no network_id"
+    );
+    assert_eq!(properties["identifier"]["type"], "string");
+    assert!(
+        input
+            .get("required")
+            .is_none_or(|required| required == &json!([])),
+        "identifier is optional: {input}"
+    );
+    // The one-time code is never an input.
+    let text = input.to_string().to_lowercase();
+    assert!(!text.contains("\"code\""), "no code input: {text}");
+
+    // It shares the read tools' output object.
+    let output = schema_value(login.output_schema.as_ref().expect("outputSchema"));
+    assert_eq!(output["required"], json!(["data"]));
     Ok(())
 }
 
@@ -516,13 +607,19 @@ async fn server_info_is_eero_mcp_with_instructions_and_only_the_tools_capability
         "refresh",
         "eero Plus",
         "authentication_required",
+        "login tool",
+        "login subcommand",
+        "one-time code",
     ] {
         assert!(
             instructions.contains(needle),
             "instructions mention {needle}"
         );
     }
-
+    assert_eq!(
+        server.title.as_deref(),
+        Some("eero (read-only network tools)")
+    );
     let capabilities = serde_json::to_value(&info.capabilities)?;
     assert_eq!(
         capabilities,

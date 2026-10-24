@@ -3,12 +3,14 @@
 //! stderr (even under a debug log filter), and that closing stdin or sending a termination signal
 //! ends the process with status 0.
 //!
-//! The child runs in a cleared environment: only `PATH` survives, and `HOME`, `APPDATA` and
-//! `EEROCTL_CONFIG_DIR` point at an empty sandbox directory, so a child can never read the
-//! developer's eeroctl file or reach a session bus for the OS keyring. Every spawned process that
-//! gets as far as credential resolution also gets `RUSTEERO_SESSION_TOKEN`, which ends it before
-//! the keyring and the files are consulted. The child's environment is set on the `Command`; the
-//! test process never mutates its own.
+//! The child runs in a cleared environment: only `PATH` survives, and `HOME`, `APPDATA`,
+//! `XDG_CONFIG_HOME`, `EEROCTL_CONFIG_DIR` and `EERO_MCP_CONFIG_DIR` point into an empty sandbox
+//! directory, and `EERO_MCP_NO_KEYRING` is 1, so a child can never read the developer's eeroctl
+//! file or eero-mcp directory, or reach the real keyring (a Keychain or Credential Manager on the
+//! macOS and Windows runners). Every spawned process that gets as far as credential resolution
+//! also gets `RUSTEERO_SESSION_TOKEN`, which ends it before the keyring and the files are
+//! consulted. The child's environment is set on the `Command`; the test process never mutates
+//! its own.
 
 mod common;
 
@@ -45,7 +47,10 @@ fn command() -> Command {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", sandbox())
         .env("APPDATA", sandbox())
-        .env("EEROCTL_CONFIG_DIR", sandbox());
+        .env("XDG_CONFIG_HOME", sandbox())
+        .env("EEROCTL_CONFIG_DIR", sandbox())
+        .env("EERO_MCP_CONFIG_DIR", sandbox().join("eero-mcp-config"))
+        .env("EERO_MCP_NO_KEYRING", "1");
     #[cfg(windows)]
     if let Some(root) = std::env::var_os("SystemRoot") {
         command.env("SystemRoot", root);
@@ -88,9 +93,14 @@ fn help_prints_usage_to_stdout_and_exits_zero() {
             "EERO_MCP_SESSION_FILE",
             "EEROCTL_CONFIG_DIR",
             "EERO_MCP_API_BASE_URL",
+            "EERO_MCP_CONFIG_DIR",
+            "EERO_MCP_NO_KEYRING",
             "RUST_LOG",
         ] {
             assert!(output.stdout.contains(variable), "{flag}: {variable}");
+        }
+        for subcommand in ["login", "logout", "status"] {
+            assert!(output.stdout.contains(subcommand), "{flag}: {subcommand}");
         }
         assert_eq!(output.stderr, "", "{flag}");
     }
@@ -120,6 +130,15 @@ fn any_other_argument_is_refused_with_status_two_and_nothing_on_stdout() {
         vec!["serve"],
         vec!["--help", "extra"],
         vec!["--version", "--help"],
+        // A subcommand takes no arguments of its own, and only the exact words count.
+        vec!["login", "extra"],
+        vec!["logout", "--force"],
+        vec!["status", "--help"],
+        vec!["login", "logout"],
+        vec!["Login"],
+        vec!["STATUS"],
+        vec!["login "],
+        vec![""],
     ] {
         let output = run({
             let mut c = command();
@@ -166,6 +185,10 @@ fn the_help_text_recommends_a_log_filter_that_excludes_rmcp() {
         "{}",
         output.stdout
     );
+    // A bare filter also logs what rmcp sees of a login: the identifier argument at debug, the
+    // form answers (identifier and one-time code) at trace.
+    assert!(output.stdout.contains("trace"), "{}", output.stdout);
+    assert!(output.stdout.contains("one-time code"), "{}", output.stdout);
 }
 
 // ===================== startup failures =====================
@@ -451,6 +474,55 @@ async fn a_failed_call_is_an_in_band_error_on_stdout() -> anyhow::Result<()> {
     let error: Value = serde_json::from_str(text)?;
     assert_eq!(error["error"]["code"], "authentication_required");
     assert!(!text.contains(TOKEN));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_login_tool_without_form_support_asks_for_the_terminal_and_sends_nothing()
+-> anyhow::Result<()> {
+    const IDENTIFIER: &str = "binary-user@example.com";
+    // The mock's write tripwire fails the test if any POST reaches it.
+    let mock = mock_cloud().await;
+    let origin = mock.uri();
+
+    let (called, stderr) = tokio::task::spawn_blocking(move || {
+        // A scoped debug filter: eero-mcp and rusteero log freely, rmcp stays quiet.
+        let mut session = Session::start(&origin, Some("eero_mcp=debug,rusteero=debug"));
+        // The handshake declares no capabilities, so no elicitation: the code could not be asked
+        // for without passing through the model.
+        let init = session.handshake();
+        let capabilities = init["result"]["capabilities"].clone();
+        let called = session.request(
+            2,
+            "tools/call",
+            &json!({"name": "login", "arguments": {"identifier": IDENTIFIER}}),
+        );
+        drop(session.stdin.take());
+        assert!(session.wait().success());
+        ((capabilities, called), session.stderr())
+    })
+    .await?;
+    let (capabilities, called) = called;
+
+    // Elicitation is a client capability: the server declares tools only.
+    assert_eq!(capabilities, json!({"tools": {}}));
+    assert_eq!(called["result"]["isError"], true, "{called}");
+    let text = called["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text");
+    let error: Value = serde_json::from_str(text)?;
+    assert_eq!(error["error"]["code"], "login_requires_terminal");
+    assert!(!text.contains(IDENTIFIER));
+    assert!(
+        !stderr.contains(IDENTIFIER) && !stderr.contains(TOKEN),
+        "neither the identifier nor the token reaches stderr:\n{stderr}"
+    );
+    assert!(
+        mock.received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
     Ok(())
 }
 

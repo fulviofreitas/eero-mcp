@@ -3,12 +3,14 @@
 [![CI](https://github.com/fulviofreitas/eero-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/fulviofreitas/eero-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for the eero
-(Amazon) mesh Wi-Fi cloud API. It lets an MCP host such as Claude Code, Claude Desktop or Cursor
-answer questions about your own network: the account, networks, eero nodes, connected devices,
-household profiles, health and diagnostics, network configuration, data usage and security
-insights. The host starts `eero-mcp` as a child process and talks to it over stdio; there is no
-daemon and no network listener.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for the eero (Amazon) mesh
+Wi-Fi cloud API. It lets an MCP host such as Claude Code, Claude Desktop or Cursor answer questions
+about your own network: the account, networks, eero nodes, connected devices, household profiles,
+health and diagnostics, network configuration, data usage and security insights. The network tools
+are read-only. eero-mcp also signs you in by itself, from a terminal (`eero-mcp login`) or from the
+chat (the `login` tool), so you do not need another tool to get a session. The host starts
+`eero-mcp` as a child process and talks to it over stdio; there is no daemon and no network
+listener.
 
 > **Unofficial project.** eero-mcp is not affiliated with or endorsed by eero or Amazon. It uses
 > eero's undocumented, reverse-engineered cloud API through
@@ -16,16 +18,21 @@ daemon and no network listener.
 
 ## Features
 
-- **Read-only.** 40 tools, all of them reads. There is no tool that changes a setting, reboots,
-  blocks, pauses, runs a test or logs in or out. The agent can see the network; it cannot change it.
+- **Read-only network tools.** 40 tools, all of them reads. There is no tool that changes a
+  setting, reboots, blocks, pauses or runs a test. The agent can see the network; it cannot change
+  it. The one other tool, `login`, signs you in (see [Logging in](#logging-in)).
+- **Its own login.** `eero-mcp login`, `logout` and `status` in a terminal, and a `login` tool for
+  hosts that can show forms. The session is kept in eero-mcp's own store (the OS keyring, with its
+  own file as the fallback), never in anyone else's.
 - **Broad coverage.** Account, networks, eero nodes, devices, profiles, health, network
   configuration, data usage and insights, with eero's own field names and values passed through.
 - **stdio transport.** JSON-RPC on stdout, logs on stderr; works with any MCP host that can launch
   a local command.
-- **Shares your existing login, read-only.** Reuses the session created by
+- **Reads an existing login too.** Reuses the session created by
   [`eeroctl`](https://github.com/fulviofreitas/eeroctl) or
   [`eero-api`](https://github.com/fulviofreitas/eero-api) (OS keyring or credential file), or takes
-  a token from the environment. It never writes, migrates or deletes a credential.
+  a token from the environment. Those credentials are only ever read: eero-mcp never writes,
+  migrates or deletes a credential it does not own.
 - **Secret redaction.** Wi-Fi and guest passwords, keys and tokens are replaced with `[REDACTED]`
   in every result.
 - **Agent-friendly results.** Structured output with an output schema on every tool, stable error
@@ -36,19 +43,21 @@ daemon and no network listener.
 - Rust 1.96 or newer to build from source. The built binary needs no Rust installation.
 - System CA certificates at runtime (the TLS stack verifies against the OS trust store; minimal
   containers need the `ca-certificates` package or equivalent).
-- An existing eero login: a session created with `eeroctl` or `eero-api`, or a session token (see
-  [Configuration](#configuration)).
+- An eero login: run `eero-mcp login` (see [Logging in](#logging-in)), or reuse a session created
+  with `eeroctl` or `eero-api`, or provide a session token (see [Configuration](#configuration)).
 
 ## Install
 
-eero-mcp is not published to crates.io: it depends on `rusteero` 3.x, which is currently available
-only as a git tag. Build it from the repository.
+eero-mcp is installed from its repository (it is not published to crates.io); its eero client,
+`rusteero`, comes from crates.io.
 
 ```bash
-# Default build: reads the shared OS keyring entry, then credential files
+# Default build: keeps its login in the OS keyring (own file as the fallback) and also reads
+# the keyring entry shared with eeroctl
 cargo install --git https://github.com/fulviofreitas/eero-mcp --locked
 
-# Headless build: no keyring support (containers, servers without a Secret Service)
+# Headless build: no keyring support (containers, servers without a Secret Service); the login
+# is kept in eero-mcp's own file
 cargo install --git https://github.com/fulviofreitas/eero-mcp --locked --no-default-features
 ```
 
@@ -61,54 +70,175 @@ cargo build --release          # add --no-default-features for the headless buil
 ./target/release/eero-mcp --version
 ```
 
-The binary is named `eero-mcp`; `cargo install` places it in `~/.cargo/bin`. The only command-line
-options are `--help` and `--version`; everything else is configured through environment
-variables.
+The binary is named `eero-mcp`; `cargo install` places it in `~/.cargo/bin`. With no argument it
+serves MCP over stdio. The only options are `--help` and `--version`, and exactly one of the
+subcommands `login`, `logout` and `status` (see [Logging in](#logging-in)); any other argument is a
+usage error (exit status 2). Everything else is configured through environment variables.
 
 ## Configuration
 
-The server never logs in. It reads an existing session, in this order (the first hit wins):
+### Logging in
+
+eero-mcp signs in by itself; it does not need `eeroctl`. eero sends a one-time code by email or SMS
+to the account you sign in with.
+
+**In a terminal.** This works with every MCP host:
+
+```bash
+eero-mcp login     # asks for your email address or phone number, then for the code eero sends
+eero-mcp status    # shows which credential the server would use, and whether eero accepts it
+eero-mcp logout    # signs eero-mcp's own session out and deletes it
+```
+
+- `login` prompts on stderr and reads your answers from stdin, one line at a time (so it also works
+  from a script). An empty line, or the word `new`, asks eero to send the code again (at most 3
+  times). A wrong or expired code starts the login again with a new code (at most 3 attempts in
+  total); any other refusal, such as a blocked account, ends it without sending more messages.
+  On success it saves the session to eero-mcp's own store, tells you where (the system keyring, or
+  the file's path) and exits 0; every failure prints one fixed line and exits 1. If the session
+  cannot be saved, it signs the new session out again, so no session that nothing stores stays
+  live. The email address, phone number and code are never logged, echoed back or put in an error.
+- `status` prints which credential source the server would use (`environment token`, `explicit
+  file`, `eero-mcp keyring`, `eero-mcp file`, `eero-api keyring`, `eeroctl file` or `none`) and
+  checks it with one account read: `valid`, `rejected` (log in again) or `unreachable`. It exits 0
+  only when the session is valid, and never prints the token, your identifier, account details,
+  ids or file paths.
+- `logout` reads eero-mcp's own store and signs each session found there out at eero (one request;
+  eero's answer is not observable, so the report says a sign-out request was sent), then deletes the
+  own keyring entry and the own file and reports what it removed. It skips the sign-out for a token
+  that another source (the environment token, the explicit file, the shared keyring entry or
+  eeroctl's file) also holds, because that would end that login too, and says so. It names every
+  store it could not check, for example the keyring when `EERO_MCP_NO_KEYRING=1`. It never touches
+  the shared credentials, `RUSTEERO_SESSION_TOKEN` or the `EERO_MCP_SESSION_FILE` file. It exits 0
+  when everything it found is gone (also when nothing was stored) and 1 when a record could not be
+  deleted.
+
+A running server picks up a login made in a terminal without a restart (see below).
+
+**In the chat.** Ask your assistant to log you in: it calls the `login` tool. The tool needs a host
+that supports MCP *form elicitation*: the server asks the host to show you a small form, first for
+your email address or phone number (skipped when you gave it in the conversation) and then for the
+code eero sent. The code is never a tool argument, so it never passes through the model. When the
+login works, the session is saved to eero-mcp's own store and installed in the running server at
+once. If the host cannot show forms, the tool returns `login_requires_terminal` and sends nothing
+to eero: run `eero-mcp login` in a terminal instead.
+
+Every login start makes eero send you an email or SMS, so a server process allows 3 starts per 15
+minutes, counted across all `login` calls: a call that the host cancels or abandons keeps the starts
+it made. A wrong code that restarts the login uses another start. When the 3 are used up, `login`
+answers `rate_limited` with `retry_after_seconds` and sends nothing; wait, or run `eero-mcp login`
+in a terminal.
+
+> **A deliberate deviation from the MCP specification.** The MCP elicitation specification
+> (2025-11-25) says servers must not use form mode to ask for sensitive information such as
+> credentials, and must use URL mode instead. eero-mcp asks for the one-time code in a form anyway,
+> because URL mode needs a browser on the machine that runs eero-mcp, which fails for remote and
+> containerized hosts. The consequence: **your MCP host receives the code in the form response and
+> may keep it in its logs or transcript.** The code never passes through the model or tool
+> arguments. Mitigations: the code is single use and short-lived and one verification consumes it
+> immediately; eero-mcp never logs, echoes or returns it; the session token itself is never put in
+> a form; the identifier form asks only for contact information. If you do not trust your host's
+> transcripts with a one-time code, use `eero-mcp login` in a terminal: it keeps the code out of the
+> host entirely.
+
+**Host tool-call timeouts.** Fetching the code from your mailbox or phone can take longer than your
+host lets a tool call run. While a form is open and the call carries a progress token, the server
+sends progress notifications (fixed text, never your identifier or the code), which some hosts use
+to extend their timeout. If the host cancels the call, the login stops at once: nothing is saved
+or installed, nothing more is sent to eero, and the next `login` call can start. If it gives up
+without cancelling, the login waits until the form is answered or times out after 10 minutes. In
+either case call `login` again, or use `eero-mcp login`. One login can run at a time.
+
+**Where the session is kept.** In eero-mcp's own store, never in the store that `eeroctl` and
+`eero-api` share:
+
+| Build | Where | Notes |
+|---|---|---|
+| Default (`keyring` feature), keyring enabled | The OS keyring entry with service `eero-mcp` and account `auth-tokens`; eero-mcp's own file `session.json` as the fallback when the keyring cannot keep it | Every save is read back to prove it was kept. |
+| Headless, or `EERO_MCP_NO_KEYRING=1` | The own file `session.json` alone | |
+
+The own file lives in `EERO_MCP_CONFIG_DIR` when set; else, on Windows, in `%APPDATA%\eero-mcp`;
+else in `$XDG_CONFIG_HOME/eero-mcp` (an absolute value only); else in `~/.config/eero-mcp`. It holds
+the same record that `eeroctl` and `eero-api` write, is created with mode `0600` in a directory the
+save creates with mode `0700` (Unix; Windows relies on the profile's access control), and is
+replaced atomically. A symbolic link at its path is replaced, never followed. A new login replaces
+the old record and removes a leftover copy in the other backend, then signs the replaced session
+out at eero (one request, best effort; the login says so), so logging in again to rotate a session
+ends the old one. It skips the sign-out for a token that another source (the environment token, the
+explicit file, the shared keyring entry or eeroctl's file) also holds, because that would end that
+login too.
+
+`login` and `logout` refuse to run, before sending anything, when `EERO_MCP_SESSION_FILE` names
+eero-mcp's own session file: a login would overwrite, and a logout delete, a credential you
+configured explicitly. Unset the variable (the own store is read anyway).
+
+**Accounts that sign in with Amazon** cannot use the one-time-code login, here or with `eeroctl`.
+Workaround: create a standard eero account (email or phone number), invite it as an admin of your
+network from the eero app, and log in with that account. An admin has full access.
+
+### Credential sources
+
+The server resolves one session at startup, in this order (the first usable token wins). After an
+authentication failure it re-reads the same chain, so a login made in a terminal is found without a
+restart:
 
 | Order | Source | Builds | Notes |
 |---|---|---|---|
 | 1 | `RUSTEERO_SESSION_TOKEN` | all | A non-empty, printable-ASCII session token, used as given (not trimmed). A set but invalid value fails startup. |
-| 2 | The OS keyring entry shared with `eeroctl` and `eero-api` (service `eero-api`, account `auth-tokens`) | default (`keyring` feature) | Read only. A missing entry or any keyring error (for example no Secret Service on headless Linux) is skipped silently. |
-| 3 | A credential-record file | all | `EERO_MCP_SESSION_FILE` when set (set but empty, unreadable or unparsable fails startup; a record without a usable token is a miss, and eeroctl's default file is then not read); otherwise eeroctl's `cookies.json`, found in `EEROCTL_CONFIG_DIR`, else `%APPDATA%\eeroctl` on Windows, else `~/.config/eeroctl`. |
-| 4 | Nothing found | all | The server still starts and lists its tools; every call returns `authentication_required` until a credential appears. |
+| 2 | `EERO_MCP_SESSION_FILE` | all | An explicit credential-record file. Set but empty, unreadable or unparsable fails startup; a record without a usable token is a miss and the search continues. Never written or deleted. |
+| 3 | eero-mcp's own store: its keyring entry (service `eero-mcp`), then its own `session.json` | the keyring entry in the default build, unless `EERO_MCP_NO_KEYRING=1`; the file in all | What `eero-mcp login` and the `login` tool save. Written only by login, deleted only by logout. |
+| 4 | The OS keyring entry shared with `eeroctl` and `eero-api` (service `eero-api`, account `auth-tokens`) | default (`keyring` feature), unless `EERO_MCP_NO_KEYRING=1` | Read only. A missing entry or any keyring error (for example no Secret Service on headless Linux) is skipped silently. |
+| 5 | eeroctl's `cookies.json`, found in `EEROCTL_CONFIG_DIR`, else `%APPDATA%\eeroctl` on Windows, else `~/.config/eeroctl` | all | Read only. |
+| 6 | Nothing found | all | The server still starts and lists its tools; every call returns `authentication_required` until a credential appears. |
+
+A source that holds a record without a token (what `eeroctl` leaves after a logout) is a miss, never
+a hit. A usable `RUSTEERO_SESSION_TOKEN` or `EERO_MCP_SESSION_FILE` takes precedence over a fresh
+login (the login result and `eero-mcp login` say so).
 
 All environment variables:
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `RUSTEERO_SESSION_TOKEN` | Session token, the first credential source. Changing it needs a restart, and while it is set it wins over keyring and file re-logins. | unset |
-| `EERO_MCP_SESSION_FILE` | Path of a credential-record file (the record format that eero-api 8.x and eeroctl write). When set it replaces eeroctl's default file; set but empty fails startup. Used literally: `~` is not expanded (MCP host `env` maps do not expand it either), so give an absolute path. | unset |
-| `EEROCTL_CONFIG_DIR` | eeroctl's configuration directory; its `cookies.json` is the default credential file. Used literally: `~` is not expanded (MCP host `env` maps do not expand it either), so give an absolute path. | unset |
-| `HOME` | Non-Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `~/.config/eeroctl/cookies.json` under it (an empty value counts as unset). | set by the OS |
-| `APPDATA` | Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `%APPDATA%\eeroctl\cookies.json`. | set by Windows |
-| `EERO_MCP_API_BASE_URL` | API base URL override, for testing against a local mock only. Accepted for `https`, or `http` on `localhost`, `127.0.0.1` or `[::1]`, with no user name, password, query or fragment; any other value fails startup. | the production eero cloud API |
+| `RUSTEERO_SESSION_TOKEN` | Session token, the first credential source. Changing it needs a restart, and while it is set it wins over every other source, logins included. | unset |
+| `EERO_MCP_SESSION_FILE` | Path of an explicit credential-record file (the record format that eero-api 8.x and eeroctl write), the second source. Set but empty fails startup. Must not name eero-mcp's own session file (login and logout refuse). Used literally: `~` is not expanded (MCP host `env` maps do not expand it either), so give an absolute path. | unset |
+| `EERO_MCP_CONFIG_DIR` | eero-mcp's own configuration directory, holding `session.json`. Must be an absolute path; set but empty or relative fails startup and every subcommand. | the platform default above |
+| `XDG_CONFIG_HOME` | Systems other than Windows: base of the own directory when `EERO_MCP_CONFIG_DIR` is unset. Used only when absolute. | unset |
+| `EERO_MCP_NO_KEYRING` | Default build: `1` skips both keyring entries (no read, no write); login then saves to the own file. Any other value, the empty value included, fails startup. No effect in the headless build. | unset: the keyring is used |
+| `EEROCTL_CONFIG_DIR` | eeroctl's configuration directory; its `cookies.json` is the default credential file. Used literally: `~` is not expanded, so give an absolute path. | unset |
+| `HOME` | Non-Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `~/.config/eeroctl/cookies.json` under it; when neither `EERO_MCP_CONFIG_DIR` nor an absolute `XDG_CONFIG_HOME` is set, the own directory is `~/.config/eero-mcp` (an empty value counts as unset). | set by the OS |
+| `APPDATA` | Windows: when `EEROCTL_CONFIG_DIR` is unset, the default credential file is `%APPDATA%\eeroctl\cookies.json`; when `EERO_MCP_CONFIG_DIR` is unset, the own directory is `%APPDATA%\eero-mcp`. | set by Windows |
+| `EERO_MCP_API_BASE_URL` | API base URL override, for testing against a local mock only. Accepted for `https`, or `http` on `localhost`, `127.0.0.1` or `[::1]`, with no user name, password, query or fragment; any other value fails startup. The subcommands and the login tool honour it too. | the production eero cloud API |
 | `EERO_MCP_LIVE` | Tests only: `1` lets the ignored live tests run. | unset |
 | `RUST_LOG` | Log filter. Logs go to stderr. | `warn` |
 
 **Keyring and headless builds.** The default build includes the `keyring` feature (Secret Service
 on Linux, Keychain on macOS, Credential Manager on Windows). The headless build
-(`--no-default-features`) has no keyring code at all and resolves credentials only from the
-environment token or a credential file. The keyring crate picks its platform store once per
-process: if no Secret Service was reachable when the server started, restart the server after it
-becomes available (a credential file is picked up without a restart).
+(`--no-default-features`) has no keyring code at all: it resolves credentials from the environment
+token and credential files, and keeps its login in the own file. The keyring crate picks its
+platform store once per process: if no Secret Service was reachable when the server started,
+restart the server after it becomes available (a credential file is picked up without a restart).
+That also applies when a terminal login saved to the keyring while the server's process could not
+reach it; set `EERO_MCP_NO_KEYRING=1` for both to keep the session in the own file.
 
 **Re-login without a restart.** After an authentication failure the server re-reads the sources
-once and, if they now yield a different token, retries the call once. Logging in again with
-`eeroctl` therefore needs no restart, unless `RUSTEERO_SESSION_TOKEN` is set.
+once and, if they now yield a different token, retries the call once. A login made with `eero-mcp
+login` (or `eeroctl`) is therefore found on the next call of a server that has no usable session, and
+at the next authentication failure of a server whose session still works; the `login` tool installs
+its session at once. A usable `RUSTEERO_SESSION_TOKEN` or `EERO_MCP_SESSION_FILE` wins every
+re-read.
 
-**Logging.** Logs go to stderr only (stdout carries JSON-RPC). For debugging use
-`RUST_LOG=eero_mcp=debug,rusteero=debug`. Avoid a bare `RUST_LOG=debug` or `trace`: it also enables
-the MCP SDK, which logs every tool call's arguments and results. Debug logs contain request paths
-with network, eero and device ids, so keep them on your machine.
+**Logging.** Logs go to stderr only (stdout carries JSON-RPC, or the subcommands' results). For
+debugging use `RUST_LOG=eero_mcp=debug,rusteero=debug`. Avoid a bare `RUST_LOG=debug` or `trace`: it
+also enables the MCP SDK, which logs every tool call's arguments and results (and, for `login`,
+the identifier argument at debug level and the form answers, identifier and one-time code, at
+trace). Debug logs contain request paths with network, eero and device ids, so keep them on your
+machine.
 
-### Getting a session
+### Reusing a session from eeroctl
 
-Log in with [`eeroctl`](https://github.com/fulviofreitas/eeroctl); eero-mcp then finds the session
-in the shared keyring entry or in eeroctl's `cookies.json` without any further configuration:
+If you already use [`eeroctl`](https://github.com/fulviofreitas/eeroctl), eero-mcp finds its
+session in the shared keyring entry or in eeroctl's `cookies.json` without any further
+configuration:
 
 ```bash
 pip install eeroctl            # or: brew install fulviofreitas/eeroctl/eeroctl
@@ -116,24 +246,21 @@ eero auth login                # one-time code by email or SMS
 ```
 
 `eero-api` users can rely on the same keyring entry, or point `EERO_MCP_SESSION_FILE` at their
-credential file.
-
-**Accounts that sign in with Amazon.** The email or SMS one-time-code login that `eeroctl` and
-`eero-api` use does not work for Amazon-login accounts. Workaround: create a standard eero account
-(email or phone number), invite it as an admin of your network from the eero app, and log in with
-that account. An admin has full access.
+credential file. eero-mcp only ever reads these.
 
 ## Registering in MCP clients
 
-Credentials are read from the keyring or a credential file by default, so a configuration entry
-usually needs no secret at all. If the binary is not on the host's `PATH` (GUI hosts often do not
+Credentials come from eero-mcp's own store, the keyring or a credential file by default, so a
+configuration entry usually needs no secret at all: run `eero-mcp login` once in a terminal, or ask
+the assistant to log you in. If the binary is not on the host's `PATH` (GUI hosts often do not
 inherit your shell `PATH`), use its absolute path, for example the full path of
 `~/.cargo/bin/eero-mcp`.
 
 ### Claude Code
 
 ```bash
-# Credentials come from the shared keyring entry or eeroctl's cookies.json
+# Credentials come from eero-mcp's own store (run eero-mcp login), the shared keyring entry or
+# eeroctl's cookies.json
 claude mcp add eero -- eero-mcp
 
 # Pin an explicit credential file or token with -e (the -- ends the option list)
@@ -191,9 +318,11 @@ stdin/stdout and writes logs to stderr; hosts usually capture stderr in their ow
 
 ## Tools
 
-Every tool is annotated read-only (`readOnlyHint` true, `destructiveHint` false,
-`idempotentHint` true, `openWorldHint` true), has a title, rejects unknown inputs, and publishes an
-input and an output schema. `network_id` is optional on every network-scoped tool (see
+41 tools. The 40 network tools are annotated read-only (`readOnlyHint` true, `destructiveHint`
+false, `idempotentHint` true, `openWorldHint` true). `login` is not read-only (`readOnlyHint` false,
+`destructiveHint` false, `idempotentHint` false, `openWorldHint` true), so a host can ask before
+running it. Every tool has a title, rejects unknown inputs, and publishes an input and an output
+schema. `network_id` is optional on every network-scoped tool (see
 [Behaviour notes](#behaviour-notes)); the tables list only the other key inputs. **Plus** marks
 data that needs an eero Plus (or eero Secure) subscription; without it the call returns
 `premium_required`.
@@ -275,6 +404,18 @@ the effective window.
 | `get_insights` | Security and ad-block insights (threats, blocks, inspections) | `start`, `end`, `cadence`, `insight_type` | Likely |
 | `get_devices_insights` | The same insights ranked per device | `start`, `end`, `cadence`, `insight_type` | Likely |
 | `get_device_insights` | Insights for one device | `device_id` (required), `start`, `end`, `cadence`, `insight_type` | Likely |
+
+### Session
+
+| Tool | Returns | Key inputs | Plus |
+|---|---|---|---|
+| `login` | **Not read-only** (it sends eero's login requests and saves a session). Signs you in with a one-time code that eero sends by email or SMS; the code is asked for through the client's own form. Returns `logged_in`, `store` (`keyring`, `file`, or `memory` when the session could not be saved and lasts only until the server stops) and `notes`. Never the token or the identifier. | `identifier` (optional email address or phone number; pass it only when you typed it in the conversation) | |
+
+Errors specific to `login`: `login_requires_terminal`, `login_cancelled` and `login_failed` (see
+below), plus `invalid_argument` (field `identifier`), `rate_limited`, `network_error` and `timeout`.
+`identifier` accepts a JSON string only: a phone number sent as a number would lose its leading plus
+sign or zeros and could start a login for someone else's number. The tool is never called against
+the real API by the tests, and a real call makes eero send you a message.
 
 ## Behaviour notes
 
@@ -370,10 +511,10 @@ when they apply, `field`, `retry_after_seconds`, `upstream_status` and `upstream
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `authentication_required` | No session, or it expired or was revoked | Log in again with `eeroctl` (picked up automatically unless `RUSTEERO_SESSION_TOKEN` is set), or restart with a fresh token |
+| `authentication_required` | No session, or it expired or was revoked | Call the `login` tool or run `eero-mcp login` (or log in with `eeroctl`); the new session is picked up automatically unless `RUSTEERO_SESSION_TOKEN` is set, in which case restart with a fresh token |
 | `premium_required` | The data needs eero Plus (or eero Secure) | Nothing to retry; the network has no such subscription |
 | `feature_unavailable` | The eero is offline, or its hardware or firmware lacks the feature | Check the node, or accept that the feature is unsupported |
-| `rate_limited` | eero is throttling requests | Wait `retry_after_seconds`; the server never retries rate limits |
+| `rate_limited` | eero is throttling requests; or, for `login` only, this server has used up its 3 login starts per 15 minutes (nothing was sent) | Wait `retry_after_seconds`; the server never retries rate limits |
 | `not_found` | Resource missing, no networks on the account, or not supported on this network or firmware | Check the id; some endpoints answer 404 on some firmware |
 | `access_denied` | The signed-in account lacks permission | Not a session problem; use an account with the right role |
 | `client_blocked` | eero rejected this client version | Update eero-mcp |
@@ -382,6 +523,9 @@ when they apply, `field`, `retry_after_seconds`, `upstream_status` and `upstream
 | `network_error` | Connection, DNS or TLS failure reaching the eero cloud | Check connectivity and CA certificates |
 | `upstream_error` | eero returned an error status (including a 403 without an access-denied code) or an unexpected response | Inspect `upstream_status`; the API may have changed |
 | `credential_error`, `internal_error` | Not expected in normal operation | Report an issue |
+| `login_requires_terminal` | `login` only: the client cannot show forms (no elicitation form capability in its handshake, or protocol 2026-07-28, which forbids server-to-client requests) | Run `eero-mcp login` in a terminal; the running server picks the session up. Nothing was sent to eero |
+| `login_cancelled` | `login` only: a form was declined or dismissed, or not answered within 10 minutes | Nothing was saved; call `login` again when you want to sign in |
+| `login_failed` | `login` only: eero refused to start the login (Amazon accounts cannot use code login), the code was rejected 3 times, eero refused the verification for another reason, a form got no usable answer, another login is in progress, or `EERO_MCP_SESSION_FILE` names the own session file | The message says which; nothing was saved. A cancelled call returns no result at all |
 
 Type errors (an unknown input field, a wrong type, a value outside an enumeration) are reported by
 the MCP SDK as plain text starting with `failed to deserialize parameters`, not in the JSON shape
@@ -389,28 +533,54 @@ above.
 
 ## Security and privacy
 
-- **Read-only by construction.** The server calls only the 40 catalogued rusteero read methods. A
-  test scans the source and fails the build if any write, action, login or logout method, or a
-  raw API request, appears in it.
-- **Credentials are only read.** The rusteero client is built with an explicit session and no
-  credential store, so nothing is written, migrated, promoted or deleted. The shared keyring entry
-  and `cookies.json` are parsed from their raw contents, never through a store that could rewrite
-  them. A failed session refresh can clear only the in-memory session.
+- **The network tools are read-only by construction.** The 40 network tools call only the 40
+  catalogued rusteero read methods. A test scans the source and fails the build if any write or
+  action method, a raw API request, or a credential store appears outside the one module that signs
+  in and out.
+- **One module signs in and out, and writes only eero-mcp's own store.** Login, logout and the
+  credential-store writes live in a single source file, reachable only through a short list of
+  exact rusteero paths, and only with eero-mcp's own keyring names and own file. The shared keyring
+  entry, `cookies.json`, `RUSTEERO_SESSION_TOKEN` and the explicit file are never written, migrated
+  or deleted, and the server's rusteero client is built with an explicit session and no credential
+  store. A failed session refresh can clear only the in-memory session.
 - **The token stays secret.** It is held as a secret in memory, and never logged, returned in a
   result or placed in error text. eero-mcp's own logs never carry credentials, credential file
-  paths or response bodies. Redirects are always refused, and credentials are sent only to the
-  configured eero API origin.
-- **One automatic non-GET request.** When eero answers a request with a 401 carrying the
+  paths or response bodies. The login identifier and the one-time code are held as secrets too, and
+  are never logged, echoed or returned. Redirects are always refused, and credentials are sent only
+  to the configured eero API origin.
+- **The one-time code goes through your host.** In the chat login the code travels in an MCP form
+  response, so the host sees it (see [Logging in](#logging-in) for the reason and the mitigations);
+  the model and the tool arguments never do. The terminal login keeps it out of the host.
+- **Requests that are not GETs.** Besides the automatic session refresh below, only explicit
+  operations send any:
+
+  | Operation | Requests |
+  |---|---|
+  | `login` tool, `eero-mcp login` | `POST /2.2/login` (eero sends the code), `POST /2.2/login/resend` (only when you ask for a new code), `POST /2.2/login/verify` |
+  | `login` tool, `eero-mcp login`, only when the login replaced an earlier session in eero-mcp's own store | `POST /2.2/logout`, once for each distinct replaced session (at most 2), sent after the new session is saved and in use, so the old one does not stay live; skipped for a session that another source also holds |
+  | `eero-mcp login`, only when the session could not be saved | `POST /2.2/logout` for that new session, so no unsaved session stays live |
+  | `eero-mcp logout` | `POST /2.2/logout`, once for each distinct session found in eero-mcp's own store and in no other source |
+  | `eero-mcp status` | one `GET /2.2/account` |
+
+  Nothing ever changes your network's settings. Each of these is sent only when you ask for it, and
+  none is retried.
+- **Automatic session maintenance.** When eero answers a request with a 401 carrying the
   `error.session.refresh` code, rusteero sends a single `POST /2.2/login/refresh` (authenticated by
   the current token) and replays the original request once. This is session maintenance, not a
-  change to your network, and it is the only non-GET request the server can cause. The token does
-  not rotate.
+  change to your network. The token does not rotate.
+- **An agent could ask for a login.** `login` takes an optional identifier chosen by the model, so
+  a prompt injection could start a login for an address you did not choose. The tool description
+  limits it to a value you typed, the tool is annotated as not read-only so hosts can ask first, the
+  code goes only to that address and never to the model, and eero rate-limits login starts. A login
+  makes at most 3 starts, 3 resends and 3 verification attempts.
 - **Your data goes only to your MCP host.** There is no network listener and no telemetry. The
   server's only outbound traffic is to the eero cloud API. Results still contain your own network
   data (device names, MAC addresses, IP addresses, the account email): that is the purpose of the
   server, and it is handed to whichever MCP host and model you connect.
 - **Keep secrets out of configuration.** A token placed in a host's `env` map is stored there in
-  plain text; prefer the keyring or a credential file.
+  plain text; prefer `eero-mcp login`, the keyring or a credential file.
+- **Own session file permissions.** The own file is `0600` in a `0700` directory on Unix; on
+  shared machines prefer the keyring (the default build), which holds the session when it works.
 
 ## Testing with the MCP Inspector
 
@@ -431,6 +601,11 @@ npx -y @modelcontextprotocol/inspector@2.12.0 --cli -q --format json \
   target/release/eero-mcp --method tools/call --tool-name get_network \
   --tool-args-json '{"network_id":"network-0001"}'
 ```
+
+`tools/list` shows 41 tools. A `tools/call` of `login` against a local mock returns
+`login_requires_terminal` (exit 5) when the Inspector's CLI declares no elicitation capability, and
+sends nothing; never call `login` against the real API from a script, because a real call makes eero
+send you a message.
 
 Exit codes: 0 success, 5 an `isError` result or an unknown tool, 1 a JSON-RPC error, 6 a `--strict`
 error. With `--strict`, a catalogue with no portability findings prints no report at all. Pass ids
@@ -459,8 +634,11 @@ cargo deny --all-features check           # licences, advisories, bans, sources
 ```
 
 The offline test suite runs every tool end to end against a mocked eero API, and includes schema
-and read-only guard tests. All fixtures are synthetic, and a tripwire expects zero non-GET
-requests.
+and read-only guard tests. The login tool is tested through an in-process MCP client that implements
+elicitation, and the subcommands through the built binary against a mock eero API with scripted
+stdin, a temporary configuration directory and the keyring disabled: no test touches the real
+keyring or your real files, and none triggers a real login. All fixtures are synthetic, and a
+tripwire fails any POST, PUT, PATCH or DELETE that a test did not expect.
 
 The live tests (`tests/live.rs`) read the real eero cloud through a hand-written read-only
 allowlist. They are `#[ignore]`d, additionally gated on `EERO_MCP_LIVE=1`, print only result codes,
@@ -471,6 +649,8 @@ CI:
 ```bash
 EERO_MCP_LIVE=1 cargo test --all-features --test live -- --ignored --nocapture
 ```
+
+The live tests never include the `login` tool or the subcommands.
 
 CI (`CI Pipeline`) runs commit lint, rustfmt and clippy, the tests on Linux, macOS and Windows with
 and without the `keyring` feature, rustdoc, `cargo deny`, and an MSRV check against the
@@ -486,8 +666,13 @@ names, input names and types, output members, error codes and configuration vari
 - **Rate limits.** eero-api documents roughly 100 requests per minute. The server caps concurrent
   upstream calls at 4, reuses the 60 s cache and never retries a rate limit (`rate_limited` carries
   `retry_after_seconds`).
-- **Amazon-login accounts** cannot use the one-time-code login; see
-  [Getting a session](#getting-a-session) for the workaround.
+- **Amazon-login accounts** cannot use the one-time-code login; see [Logging in](#logging-in) for
+  the workaround.
+- **Hosts without form elicitation.** Some MCP hosts cannot show forms, and protocol 2026-07-28
+  forbids server-to-client requests. The `login` tool then returns `login_requires_terminal`; use
+  `eero-mcp login` in a terminal.
+- **Host tool-call timeouts.** A host may end a `login` call before you have the code; see
+  [Logging in](#logging-in).
 - **403 and 404 on some accounts or firmware.** `get_transfer_stats` returns a 403 on some
   accounts, and some endpoints answer 404 on some firmware or networks.
 - **Undocumented API.** The API is reverse-engineered and can change; data is returned as-is, so
@@ -499,12 +684,12 @@ names, input names and types, output members, error codes and configuration vari
   radio range. The server tells the agent to treat them as data, never as instructions, but a
   host that acts on tool results should still treat them as untrusted input.
 - **Cached reads can be up to 60 seconds old.** Use `refresh: true` where a tool offers it.
-- **No login flow, one account per process.** The server cannot log in (the one-time-code flow
-  sends a message and cannot prompt over stdio). Run a second server entry for a second account and
-  give it its own `RUSTEERO_SESSION_TOKEN`, which wins over every other source. With the default
-  chain both entries read the same keyring entry or `cookies.json` and so get the same account, and
-  in the default build a populated keyring entry is read before `EERO_MCP_SESSION_FILE`, so a
-  separate credential file alone only works in the headless build (`--no-default-features`).
+- **One account per process.** Run a second server entry for a second account and give it its own
+  `RUSTEERO_SESSION_TOKEN`, which wins over every other source. With the default chain both entries
+  read the same own store, keyring entry or `cookies.json` and so get the same account; a usable
+  `EERO_MCP_SESSION_FILE` is read before the own store, so a separate credential file also works.
+  Separate own stores need separate `EERO_MCP_CONFIG_DIR` values (and `EERO_MCP_NO_KEYRING=1`, as
+  there is one keyring entry per user).
 - **`get_network_scan`** is a read, but eero does not document whether reading it refreshes the
   radio scan server-side.
 

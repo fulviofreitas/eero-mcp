@@ -49,6 +49,12 @@ pub enum ErrorCode {
     CredentialError,
     /// Anything else.
     InternalError,
+    /// The login tool cannot ask for the one-time code: the client shows no forms.
+    LoginRequiresTerminal,
+    /// The login was declined, dismissed or not answered in time.
+    LoginCancelled,
+    /// The login failed.
+    LoginFailed,
 }
 
 impl ErrorCode {
@@ -68,6 +74,9 @@ impl ErrorCode {
             Self::UpstreamError => "upstream_error",
             Self::CredentialError => "credential_error",
             Self::InternalError => "internal_error",
+            Self::LoginRequiresTerminal => "login_requires_terminal",
+            Self::LoginCancelled => "login_cancelled",
+            Self::LoginFailed => "login_failed",
         }
     }
 }
@@ -139,6 +148,24 @@ impl ToolError {
         Self::new(ErrorCode::InternalError, INTERNAL)
     }
 
+    /// A `rate_limited` error from a login request, with the wait eero asked for, when it sent
+    /// one.
+    pub fn rate_limited(retry_after_seconds: Option<u64>) -> Self {
+        let mut error = Self::new(ErrorCode::RateLimited, RATE_LIMITED);
+        error.retry_after_seconds = retry_after_seconds;
+        error
+    }
+
+    /// A `network_error` with fixed text.
+    pub fn network() -> Self {
+        Self::new(ErrorCode::NetworkError, NETWORK)
+    }
+
+    /// A `timeout` error with fixed text.
+    pub fn timeout() -> Self {
+        Self::new(ErrorCode::Timeout, TIMEOUT)
+    }
+
     /// The `{"error": {...}}` object.
     pub fn to_value(&self) -> Value {
         let mut error = Map::new();
@@ -175,9 +202,9 @@ impl IntoCallToolResult for ToolError {
     }
 }
 
-const AUTH_SESSION: &str = "The eero session has expired, is invalid or was revoked. Log in again with eeroctl (or eero-api), or set a fresh RUSTEERO_SESSION_TOKEN and restart the server. Credentials stored by eeroctl or eero-api are re-read automatically, so no restart is needed for those.";
-const AUTH_NO_CREDENTIAL: &str = "No eero credential is available. Log in with eeroctl (or eero-api), or set RUSTEERO_SESSION_TOKEN or EERO_MCP_SESSION_FILE. Credentials stored by eeroctl or eero-api are re-read automatically, so no restart is needed for those.";
-const AUTH_GENERIC: &str = "The eero session is missing, expired or revoked. Log in again with eeroctl (or eero-api), or set a fresh RUSTEERO_SESSION_TOKEN and restart the server. Credentials stored by eeroctl or eero-api are re-read automatically, so no restart is needed for those.";
+const AUTH_SESSION: &str = "The eero session has expired, is invalid or was revoked. Sign in again with the login tool, or run the login subcommand of eero-mcp in a terminal (eeroctl or eero-api work too), or set a fresh RUSTEERO_SESSION_TOKEN and restart the server. Stored credentials are re-read automatically, so no restart is needed for those.";
+const AUTH_NO_CREDENTIAL: &str = "No eero credential is available. Sign in with the login tool, or run the login subcommand of eero-mcp in a terminal (eeroctl or eero-api work too), or set RUSTEERO_SESSION_TOKEN or EERO_MCP_SESSION_FILE. Stored credentials are re-read automatically, so no restart is needed for those.";
+const AUTH_GENERIC: &str = "The eero session is missing, expired or revoked. Sign in again with the login tool, or run the login subcommand of eero-mcp in a terminal (eeroctl or eero-api work too), or set a fresh RUSTEERO_SESSION_TOKEN and restart the server. Stored credentials are re-read automatically, so no restart is needed for those.";
 const PREMIUM: &str = "This data needs an eero Plus (or eero Secure) subscription on this network.";
 const FEATURE_UNAVAILABLE: &str =
     "The eero is offline, or its hardware or firmware does not support this feature.";
@@ -367,6 +394,9 @@ mod tests {
             (ErrorCode::UpstreamError, "upstream_error"),
             (ErrorCode::CredentialError, "credential_error"),
             (ErrorCode::InternalError, "internal_error"),
+            (ErrorCode::LoginRequiresTerminal, "login_requires_terminal"),
+            (ErrorCode::LoginCancelled, "login_cancelled"),
+            (ErrorCode::LoginFailed, "login_failed"),
         ];
         for (code, text) in all {
             assert_eq!(code.as_str(), text);

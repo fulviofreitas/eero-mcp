@@ -584,7 +584,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "eero-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -1852,6 +1852,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1876,8 +1877,9 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rusteero"
-version = "3.0.0"
-source = "git+https://github.com/fulviofreitas/rusteero?tag=v3.0.0#c0f0ac52290142f1dd926a44f9271cba6772c8c4"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e3160b6747899c31edc083149b471fcbe8cc586a50ea2ab6bac87b9aaa4c9e7"
 dependencies = [
  "bytes",
  "jiff",

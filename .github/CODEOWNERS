@@ -40,3 +40,10 @@
 /tests/common/mod.rs        @fulviofreitas
 /src/redact.rs              @fulviofreitas
 /src/errors.rs              @fulviofreitas
+
+# The login module (the only code that signs in or out and writes a credential, and only
+# eero-mcp's own), the login tool (elicitation, the login lock, cancellation) and the subcommand
+# front end: a change here could widen what is written, logged or asked for.
+/src/auth.rs          @fulviofreitas
+/src/tools/login.rs   @fulviofreitas
+/src/cli.rs           @fulviofreitas

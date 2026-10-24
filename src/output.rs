@@ -11,6 +11,7 @@ use schemars::{JsonSchema, Schema};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::auth::StoreKind;
 use crate::params::{Cadence, DetailMode, InsightType, drop_default, non_negative};
 use crate::redact;
 use crate::window::Window;
@@ -141,6 +142,21 @@ impl ToolOutput {
             detail: None,
             count: None,
         }
+    }
+
+    /// The outcome of the login tool: `logged_in` (always true), `store` (`keyring`, `file`, or
+    /// `memory` when the save failed and the session lasts until the server stops) and `notes`
+    /// (fixed strings, present only when there are any). Never the token, the identifier or
+    /// account data, and no network id or server time.
+    pub fn login_result(store: StoreKind, notes: &[&str]) -> Self {
+        let mut data = serde_json::json!({
+            "logged_in": true,
+            "store": store.as_str(),
+        });
+        if !notes.is_empty() {
+            data["notes"] = serde_json::json!(notes);
+        }
+        Self::from_value(&data)
     }
 
     /// The envelope's data, redacted, plus the envelope's server time. The rest of the envelope

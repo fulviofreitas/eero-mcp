@@ -8,6 +8,15 @@
 //! rusteero's own environment-reading session constructor is deliberately not used: it reads the
 //! real process environment, and its value-level validator is not public. [`token_shape_ok`]
 //! applies the same rule here.
+//!
+//! # eero-mcp's own credential store
+//!
+//! From 0.2.0 the login subcommand and the login tool keep the session in eero-mcp's own store:
+//! the OS keyring entry [`OWN_KEYRING_SERVICE`] / [`OWN_KEYRING_ACCOUNT`] (keyring builds, unless
+//! `EERO_MCP_NO_KEYRING` is 1) with the own file [`OWN_FILE_NAME`] in the own directory as the
+//! fallback. The own directory is, in order: `EERO_MCP_CONFIG_DIR` (absolute); on Windows
+//! `%APPDATA%\eero-mcp`; `$XDG_CONFIG_HOME/eero-mcp` (absolute values only, per the XDG base
+//! directory rule); `$HOME/.config/eero-mcp`; otherwise there is no own file.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -29,16 +38,34 @@ pub const APPDATA_VAR: &str = "APPDATA";
 pub const HOME_VAR: &str = "HOME";
 /// Development and testing only: API base override.
 pub const API_BASE_URL_VAR: &str = "EERO_MCP_API_BASE_URL";
+/// eero-mcp's own configuration directory (absolute), holding its session file.
+pub const CONFIG_DIR_VAR: &str = "EERO_MCP_CONFIG_DIR";
+/// Base of the own configuration directory on systems other than Windows (absolute values only).
+pub const XDG_CONFIG_HOME_VAR: &str = "XDG_CONFIG_HOME";
+/// Set to `1` to skip both keyring entries (no read, no write) in keyring builds.
+pub const NO_KEYRING_VAR: &str = "EERO_MCP_NO_KEYRING";
 
 /// Every variable this crate reads. [`EnvMap::from_process`] copies only these.
-pub const VARS: [&str; 6] = [
+pub const VARS: [&str; 9] = [
     TOKEN_VAR,
     SESSION_FILE_VAR,
     EEROCTL_CONFIG_DIR_VAR,
     APPDATA_VAR,
     HOME_VAR,
     API_BASE_URL_VAR,
+    CONFIG_DIR_VAR,
+    XDG_CONFIG_HOME_VAR,
+    NO_KEYRING_VAR,
 ];
+
+/// The keyring service of eero-mcp's own entry. Never the shared `eero-api` service.
+pub const OWN_KEYRING_SERVICE: &str = "eero-mcp";
+/// The keyring account of eero-mcp's own entry.
+pub const OWN_KEYRING_ACCOUNT: &str = "auth-tokens";
+/// The file name of eero-mcp's own session record, inside the own directory.
+pub const OWN_FILE_NAME: &str = "session.json";
+/// The folder name of the own directory under a configuration base.
+const OWN_DIR_NAME: &str = "eero-mcp";
 
 /// The file name eeroctl keeps its credential record in.
 const COOKIES_FILE: &str = "cookies.json";
@@ -111,6 +138,10 @@ pub enum ConfigError {
     EmptySessionFile,
     /// `EERO_MCP_API_BASE_URL` is not an https URL or an http URL on a loopback host.
     InvalidApiBaseUrl,
+    /// `EERO_MCP_CONFIG_DIR` is set but empty or not an absolute path.
+    InvalidConfigDir,
+    /// `EERO_MCP_NO_KEYRING` is set to anything other than `1`.
+    InvalidNoKeyring,
 }
 
 impl fmt::Display for ConfigError {
@@ -125,6 +156,10 @@ impl fmt::Display for ConfigError {
                 "EERO_MCP_API_BASE_URL is rejected: it must be an https URL, or an http URL on \
                  localhost, 127.0.0.1 or [::1], with no credentials, query or fragment"
             }
+            Self::InvalidConfigDir => {
+                "EERO_MCP_CONFIG_DIR is set but invalid: it must be a non-empty absolute path"
+            }
+            Self::InvalidNoKeyring => "EERO_MCP_NO_KEYRING is set but invalid: the only value is 1",
         })
     }
 }
@@ -142,6 +177,12 @@ pub struct Settings {
     pub default_session_file: Option<PathBuf>,
     /// `EERO_MCP_API_BASE_URL`, when set and accepted (development and testing only).
     pub api_base_url: Option<String>,
+    /// eero-mcp's own session file ([`OWN_FILE_NAME`] in the own directory), when a directory can
+    /// be determined. Read by the credential chain; written only by login and logout.
+    pub own_file: Option<PathBuf>,
+    /// Whether the OS keyring may be used (`EERO_MCP_NO_KEYRING` is not 1). Meaningful in builds
+    /// with the `keyring` feature only; headless builds never touch a keyring.
+    pub keyring_enabled: bool,
 }
 
 impl Settings {
@@ -181,11 +222,19 @@ impl Settings {
             }
         };
 
+        let keyring_enabled = match env.get(NO_KEYRING_VAR) {
+            None => true,
+            Some(value) if value == "1" => false,
+            Some(_) => return Err(ConfigError::InvalidNoKeyring),
+        };
+
         Ok(Self {
             session_token,
             session_file,
             default_session_file: default_session_file(env, windows),
             api_base_url,
+            own_file: own_dir(env, windows)?.map(|dir| dir.join(OWN_FILE_NAME)),
+            keyring_enabled,
         })
     }
 }
@@ -212,6 +261,32 @@ fn default_session_file(env: &EnvMap, windows: bool) -> Option<PathBuf> {
             .join("eeroctl")
             .join(COOKIES_FILE),
     )
+}
+
+/// eero-mcp's own configuration directory: `EERO_MCP_CONFIG_DIR` (absolute; set but empty or
+/// relative is an error); else, on Windows, `eero-mcp` under `APPDATA`; else `eero-mcp` under an
+/// absolute `XDG_CONFIG_HOME`; else `.config/eero-mcp` under `HOME`; else none. Empty `APPDATA`,
+/// `XDG_CONFIG_HOME` and `HOME` count as unset, and a relative `XDG_CONFIG_HOME` is ignored.
+fn own_dir(env: &EnvMap, windows: bool) -> Result<Option<PathBuf>, ConfigError> {
+    if let Some(dir) = env.get(CONFIG_DIR_VAR) {
+        let dir = PathBuf::from(dir);
+        if dir.as_os_str().is_empty() || !dir.is_absolute() {
+            return Err(ConfigError::InvalidConfigDir);
+        }
+        return Ok(Some(dir));
+    }
+    if windows && let Some(appdata) = env.non_empty(APPDATA_VAR) {
+        return Ok(Some(PathBuf::from(appdata).join(OWN_DIR_NAME)));
+    }
+    if let Some(base) = env.non_empty(XDG_CONFIG_HOME_VAR) {
+        let base = PathBuf::from(base);
+        if base.is_absolute() {
+            return Ok(Some(base.join(OWN_DIR_NAME)));
+        }
+    }
+    Ok(env
+        .non_empty(HOME_VAR)
+        .map(|home| PathBuf::from(home).join(".config").join(OWN_DIR_NAME)))
 }
 
 /// The `EERO_MCP_API_BASE_URL` rule: https, or http on a loopback host (`localhost`,
@@ -476,6 +551,149 @@ mod tests {
         assert!(!text.contains(secret));
         let token_error = settings(&[(TOKEN_VAR, "bad\ntoken")]).expect_err("rejected");
         assert!(!token_error.to_string().contains("bad"));
+    }
+
+    /// An absolute path on every platform.
+    fn abs(tail: &str) -> PathBuf {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        PathBuf::from(root).join(tail)
+    }
+
+    fn own_file(pairs: &[(&str, &str)], windows: bool) -> Result<Option<PathBuf>, ConfigError> {
+        Settings::from_env_for(&env(pairs), windows).map(|settings| settings.own_file)
+    }
+
+    #[test]
+    fn the_own_directory_prefers_the_config_dir_variable() {
+        let config = abs("cfg");
+        let appdata = abs("appdata");
+        let xdg = abs("xdg");
+        let found = own_file(
+            &[
+                (CONFIG_DIR_VAR, config.to_str().expect("utf-8")),
+                (APPDATA_VAR, appdata.to_str().expect("utf-8")),
+                (XDG_CONFIG_HOME_VAR, xdg.to_str().expect("utf-8")),
+                (HOME_VAR, "/home/user"),
+            ],
+            true,
+        )
+        .expect("valid");
+        assert_eq!(found, Some(config.join("session.json")));
+    }
+
+    #[test]
+    fn the_own_directory_uses_appdata_only_on_windows() {
+        let appdata = abs("appdata");
+        let pairs = [
+            (APPDATA_VAR, appdata.to_str().expect("utf-8")),
+            (HOME_VAR, "/home/user"),
+        ];
+        assert_eq!(
+            own_file(&pairs, true).expect("valid"),
+            Some(appdata.join("eero-mcp").join("session.json"))
+        );
+        assert_eq!(
+            own_file(&pairs, false).expect("valid"),
+            Some(
+                Path::new("/home/user")
+                    .join(".config")
+                    .join("eero-mcp")
+                    .join("session.json")
+            )
+        );
+        // Windows without APPDATA falls through to the next rule.
+        assert!(
+            own_file(&[(HOME_VAR, "/home/user")], true)
+                .expect("valid")
+                .expect("home fallback")
+                .ends_with(Path::new(".config").join("eero-mcp").join("session.json"))
+        );
+    }
+
+    #[test]
+    fn the_own_directory_honours_an_absolute_xdg_config_home_only() {
+        let xdg = abs("xdg");
+        assert_eq!(
+            own_file(
+                &[
+                    (XDG_CONFIG_HOME_VAR, xdg.to_str().expect("utf-8")),
+                    (HOME_VAR, "/home/user"),
+                ],
+                false
+            )
+            .expect("valid"),
+            Some(xdg.join("eero-mcp").join("session.json"))
+        );
+        // A relative value is ignored, per the XDG base-directory rule, and so is an empty one.
+        for ignored in ["relative/path", ""] {
+            assert!(
+                own_file(
+                    &[(XDG_CONFIG_HOME_VAR, ignored), (HOME_VAR, "/home/user")],
+                    false
+                )
+                .expect("valid")
+                .expect("home fallback")
+                .ends_with(Path::new(".config").join("eero-mcp").join("session.json")),
+                "{ignored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn there_is_no_own_file_without_any_base_directory() {
+        assert_eq!(own_file(&[], false).expect("valid"), None);
+        assert_eq!(
+            own_file(&[(HOME_VAR, ""), (XDG_CONFIG_HOME_VAR, "")], false).expect("valid"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_or_relative_config_dir_is_a_configuration_error() {
+        for bad in ["", "relative/dir", "./dir", "~"] {
+            assert_eq!(
+                own_file(&[(CONFIG_DIR_VAR, bad), (HOME_VAR, "/home/user")], false)
+                    .expect_err("must fail"),
+                ConfigError::InvalidConfigDir,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keyring_switch_accepts_only_one() {
+        assert!(settings(&[]).expect("valid").keyring_enabled);
+        assert!(
+            !settings(&[(NO_KEYRING_VAR, "1")])
+                .expect("valid")
+                .keyring_enabled
+        );
+        for bad in ["", "0", "true", "yes", "11", " 1"] {
+            assert_eq!(
+                settings(&[(NO_KEYRING_VAR, bad)]).expect_err("must fail"),
+                ConfigError::InvalidNoKeyring,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_own_keyring_names_are_not_the_shared_ones() {
+        assert_eq!(OWN_KEYRING_SERVICE, "eero-mcp");
+        assert_eq!(OWN_KEYRING_ACCOUNT, "auth-tokens");
+        assert_eq!(OWN_FILE_NAME, "session.json");
+        assert_ne!(OWN_KEYRING_SERVICE, "eero-api");
+    }
+
+    #[test]
+    fn the_new_configuration_errors_name_variables_but_never_values() {
+        let secret = "relative/s3cret-dir";
+        let error = settings(&[(CONFIG_DIR_VAR, secret)]).expect_err("rejected");
+        assert!(error.to_string().contains(CONFIG_DIR_VAR));
+        assert!(!error.to_string().contains(secret));
+        let error = settings(&[(NO_KEYRING_VAR, "s3cret")]).expect_err("rejected");
+        assert!(error.to_string().contains(NO_KEYRING_VAR));
+        assert!(!error.to_string().contains("s3cret"));
     }
 
     #[test]

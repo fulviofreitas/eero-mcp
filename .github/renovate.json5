@@ -104,17 +104,15 @@
     },
 
     // ==========================================================================
-    // 🦀 rusteero (git tag dependency): never auto-merge, always reviewed by hand
+    // 🦀 rusteero: never auto-merge, always reviewed by hand
     // ==========================================================================
-    // rusteero 3.x is not on crates.io, so Cargo.toml pins it to a release tag
-    // (`git` + `tag`) with a matching `version` requirement next to it. A bump
-    // changes the whole eero API surface this server wraps, and the `tag` and
-    // `version` fields must move together. This rule comes after the generic
-    // cargo and major rules so that it wins over them.
+    // A bump changes the whole eero API surface this server wraps (and the
+    // read-only guard's lists of rusteero methods). This rule comes after the
+    // generic cargo and major rules so that it wins over them.
     {
       matchManagers: ["cargo"],
-      matchPackageNames: ["rusteero", "https://github.com/fulviofreitas/rusteero"],
-      description: "rusteero git tag bumps are reviewed by hand (never auto-merged)",
+      matchPackageNames: ["rusteero"],
+      description: "rusteero bumps are reviewed by hand (never auto-merged)",
       groupName: null,
       automerge: false,
       labels: ["dependencies", "renovate", "needs-review"],
