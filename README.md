@@ -40,7 +40,8 @@ listener.
 
 ## Requirements
 
-- Rust 1.96 or newer to build from source. The built binary needs no Rust installation.
+- Nothing for a [prebuilt binary](#prebuilt-binaries); Rust 1.96 or newer to build from source.
+  The built binary needs no Rust installation.
 - System CA certificates at runtime (the TLS stack verifies against the OS trust store; minimal
   containers need the `ca-certificates` package or equivalent).
 - An eero login: run `eero-mcp login` (see [Logging in](#logging-in)), or reuse a session created
@@ -48,8 +49,41 @@ listener.
 
 ## Install
 
-eero-mcp is installed from its repository (it is not published to crates.io); its eero client,
-`rusteero`, comes from crates.io.
+### Prebuilt binaries
+
+Every [GitHub release](https://github.com/fulviofreitas/eero-mcp/releases) carries a ready-to-run
+binary for each platform below, a `SHA256SUMS` file and a build-provenance attestation for each
+archive. Each archive holds the `eero-mcp` binary (the default build, with OS keyring support and
+eero-mcp's own file as the fallback), `README.md`, `LICENSE` and `NOTICE`.
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 (static, any distribution) | `eero-mcp-v<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 (static, any distribution) | `eero-mcp-v<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple silicon | `eero-mcp-v<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `eero-mcp-v<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `eero-mcp-v<version>-x86_64-pc-windows-msvc.zip` |
+
+```bash
+VERSION=0.2.0                          # the release to install
+TARGET=x86_64-unknown-linux-musl       # one of the targets above
+NAME="eero-mcp-v${VERSION}-${TARGET}"
+curl -fsSLO "https://github.com/fulviofreitas/eero-mcp/releases/download/v${VERSION}/${NAME}.tar.gz"
+curl -fsSLO "https://github.com/fulviofreitas/eero-mcp/releases/download/v${VERSION}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS     # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "${NAME}.tar.gz" --repo fulviofreitas/eero-mcp   # optional: built by this repo's release workflow
+tar -xzf "${NAME}.tar.gz"
+install -m 0755 "${NAME}/eero-mcp" ~/.local/bin/eero-mcp   # or any directory on your PATH
+eero-mcp --version
+```
+
+The binaries are not code-signed. On macOS, a binary downloaded with a browser is quarantined:
+clear it with `xattr -d com.apple.quarantine eero-mcp` (a `curl` download is not quarantined).
+
+### From source
+
+eero-mcp can also be installed from its repository (it is not published to crates.io); its eero
+client, `rusteero`, comes from crates.io.
 
 ```bash
 # Default build: keeps its login in the OS keyring (own file as the fallback) and also reads
