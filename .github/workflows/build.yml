@@ -1,0 +1,180 @@
+# ============================================================================
+# 📦 Release Binaries
+# ============================================================================
+# Builds the eero-mcp binary for every supported platform and uploads one archive per target as
+# a workflow artifact. Two callers:
+#
+# - release.yml calls it (workflow_call) with the tag to build; its publish job then attaches the
+#   archives, a SHA256SUMS file and build-provenance attestations to the GitHub release.
+# - Pull requests that change what a release build depends on (this file, release.yml, the
+#   manifest, the lockfile, the toolchain file) run it too, so a broken target is caught before
+#   it can break a release.
+#
+# Targets: static musl binaries for Linux (run on any distribution and in minimal containers, no
+# glibc version to match), native builds for macOS (Apple silicon and Intel) and Windows. Every
+# binary is the default build (OS keyring support with eero-mcp's own file as the fallback).
+#
+# No build cache: release artifacts are built from a clean state, never from a cache another
+# branch could have written.
+#
+# Pinning: as in ci.yml, every action is pinned to a full commit SHA.
+# ============================================================================
+
+name: 📦 Release Binaries
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build (refs/tags/v<version>)"
+        required: true
+        type: string
+      version:
+        description: "Version the tagged Cargo.toml must carry (no leading v)"
+        required: true
+        type: string
+  pull_request:
+    branches: [master]
+    paths:
+      - ".github/workflows/build.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release binaries carry no debug symbols; panics still name the failing location.
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
+jobs:
+  build:
+    name: 📦 Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            musl: true
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            musl: true
+            smoke: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            smoke: true
+          # Cross-compiled on the Apple silicon runner, which cannot run it (no Rosetta).
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            smoke: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            smoke: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # A release build must carry the version of its tag; a pull request builds whatever its
+      # manifest says.
+      - name: 🔎 Resolve the version
+        id: version
+        env:
+          EXPECTED: ${{ inputs.version }}
+        run: |
+          manifest=$(sed -n '0,/^version = /s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$manifest" ]; then
+            echo "::error::No package version found in Cargo.toml."
+            exit 1
+          fi
+          if [ -n "$EXPECTED" ] && [ "$manifest" != "$EXPECTED" ]; then
+            echo "::error::Cargo.toml says version \"$manifest\", expected \"$EXPECTED\"."
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: 🧰 Install musl tools
+        if: matrix.musl
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools
+
+      - name: 🦀 Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: 🔨 cargo build --release
+        env:
+          TARGET: ${{ matrix.target }}
+          MUSL: ${{ matrix.musl }}
+        run: |
+          # The C parts (aws-lc, ring) must be compiled against musl, not the runner's glibc.
+          [ "$MUSL" = "true" ] && export TARGET_CC=musl-gcc
+          cargo build --locked --release --target "$TARGET"
+
+      - name: 💨 Smoke test
+        if: matrix.smoke
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bin="target/$TARGET/release/eero-mcp"
+          [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
+          got=$("$bin" --version | tr -d '\r')
+          if [ "$got" != "eero-mcp $VERSION" ]; then
+            echo "::error::--version printed \"$got\", expected \"eero-mcp $VERSION\"."
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            file "$bin"
+            if ! file "$bin" | grep -q 'statically linked'; then
+              echo "::error::The Linux binary is not statically linked."
+              exit 1
+            fi
+          fi
+          echo "$got"
+
+      - name: 🗜️ Package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="eero-mcp-v${VERSION}-${TARGET}"
+          mkdir -p "dist/$name"
+          exe=""
+          [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
+          cp "target/$TARGET/release/eero-mcp$exe" README.md LICENSE NOTICE "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip -bso0 "$name.zip" "$name"
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+          ls -l
+
+      - name: 📤 Upload the archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

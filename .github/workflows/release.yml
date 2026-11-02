@@ -1,0 +1,260 @@
+# ============================================================================
+# 🚀 Automated Semantic Release
+# ============================================================================
+# Chain: CI on master (green) → semantic-release (version bump, CHANGELOG.md, tag, GitHub release)
+# → release binaries for every platform (build.yml) → publish: archives, SHA256SUMS and
+# build-provenance attestations attached to the release.
+#
+# semantic-release reads the conventional commits since the last v* tag (rules in
+# .releaserc.json): feat → minor, fix / perf / revert → patch, a breaking change → major, anything
+# else → no release. Its release commit `chore(release): v<version> [skip ci]` is pushed to master
+# with the ff-renovate GitHub App token: a push made with GITHUB_TOKEN would not start the
+# workflows that should follow it, and the App is the master ruleset's bypass actor.
+#
+# Manual runs (workflow_dispatch on master):
+# - dry_run=true: semantic-release reports what it would release and changes nothing.
+# - build_version=<version>: no semantic-release; build the existing tag v<version> and attach
+#   the binaries to its release, creating the release (with generated notes) when the tag has
+#   none. Use it to retry a failed publish or to add binaries to an older tag. With dry_run=true
+#   it builds without publishing.
+#
+# Pinning: as in ci.yml, every action is pinned to a full commit SHA; the workflow-arsenal and
+# dtolnay/rust-toolchain pins record the date they were taken and are bumped by hand.
+# ============================================================================
+
+name: 🚀 Release
+
+on:
+  # Safe here: the jobs check out master (or a tag on master), never the triggering run's code,
+  # and use none of its artifacts; the release job also requires a push to master of this
+  # repository, because the branch filter alone matches a fork's pull request from a branch
+  # named master.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: ["🧪 CI Pipeline"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "🧪 Dry-run mode (no release; with build_version, build without publishing)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      build_version:
+        description: "📦 Build and publish binaries for the existing tag v<version> (e.g. 0.2.0) instead of releasing"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # 1️⃣ Semantic release
+  # ============================================================================
+  release:
+    name: 🚀 Semantic Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.build_version == '') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      !contains(github.event.workflow_run.head_commit.message, '[skip ci]') &&
+      !contains(github.event.workflow_run.head_commit.message, 'chore(release)'))
+    # The arsenal action reports a release by comparing the VERSION file before and after
+    # semantic-release runs (.releaserc.json's prepareCmd rewrites it).
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: 🔑 Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RENOVATE_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          # Push the release commit and tag, create the release, comment on released issues/PRs.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: 📥 Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+      - name: 🦀 Setup Rust (for `cargo update` in prepareCmd)
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master @ 2026-10-23
+        with:
+          toolchain: stable
+      # prepareCmd runs `cargo update -p eero-mcp --offline` to refresh the lockfile after it
+      # rewrites the version; a fresh runner has no registry index, so populate it first.
+      - name: 📦 Prime the cargo registry cache
+        run: cargo fetch --locked
+      - name: 📍 Record HEAD before semantic-release
+        id: before
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: 🚀 Run semantic-release
+        id: release
+        uses: fulviofreitas/workflow-arsenal/.github/actions/semantic-release@642407a86382c004118624fd9df69b356cb698fb # master @ 2026-11-02
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          dry-run: ${{ github.event.inputs.dry_run || 'false' }}
+      # @semantic-release/git commits the release before pushing it, so HEAD moves exactly when a
+      # release is cut. A release the action did not report would skip the binaries silently.
+      - name: 🛑 Fail if a release was cut but not reported
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          BEFORE: ${{ steps.before.outputs.sha }}
+          RELEASED: ${{ steps.release.outputs.released }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$BEFORE" ] && [ "$RELEASED" != "true" ]; then
+            echo "::error::A release was cut but the action reported released='$RELEASED'." \
+              "Dispatch this workflow with build_version to attach its binaries."
+            exit 1
+          fi
+      # semantic-release pushes the tag before its GitHub-release and success steps; if one of
+      # those fails, nothing below runs and a re-run would not cut the release again.
+      - name: 🧭 Name a tag that was pushed before semantic-release failed
+        if: failure() && steps.release.outcome == 'failure'
+        env:
+          BEFORE: ${{ steps.before.outputs.sha }}
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v*' | head -n 1)
+          if [ "$(git rev-parse HEAD)" != "$BEFORE" ] && [ -n "$tag" ] &&
+            [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+            echo "::error::$tag was pushed, but semantic-release failed afterwards. Do not re-run" \
+              "this job; dispatch this workflow with build_version=${tag#v}."
+          fi
+
+  # ============================================================================
+  # 2️⃣ Pick and check the version to build
+  # ============================================================================
+  resolve:
+    name: 🧭 Resolve the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: release
+    if: |
+      always() &&
+      ((needs.release.result == 'success' && needs.release.outputs.released == 'true' &&
+        github.event.inputs.dry_run != 'true') ||
+      (needs.release.result == 'skipped' && github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.build_version != ''))
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      ref: ${{ steps.check.outputs.ref }}
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 🔎 Check the tag
+        id: check
+        env:
+          RELEASED_VERSION: ${{ needs.release.outputs.version }}
+          BUILD_VERSION: ${{ github.event.inputs.build_version }}
+        run: |
+          version="${RELEASED_VERSION:-$BUILD_VERSION}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The version must be a bare semver version such as 0.2.0 (no leading v)."
+            exit 1
+          fi
+          git fetch --force --tags origin
+          if ! git rev-parse -q --verify "refs/tags/v$version^{commit}" >/dev/null; then
+            echo "::error::Tag v$version does not exist."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/v$version" origin/master; then
+            echo "::error::v$version is not on master."
+            exit 1
+          fi
+          tagged=$(git show "refs/tags/v$version:Cargo.toml" | sed -n '0,/^version = /s/^version = "\(.*\)"$/\1/p')
+          if [ "$tagged" != "$version" ]; then
+            echo "::error::Cargo.toml at v$version says version \"$tagged\"."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/tags/v$version" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # 3️⃣ Build the binaries from the tag
+  # ============================================================================
+  build:
+    name: 📦 Binaries
+    needs: resolve
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.resolve.outputs.ref }}
+      version: ${{ needs.resolve.outputs.version }}
+
+  # ============================================================================
+  # 4️⃣ Attach them to the GitHub release
+  # ============================================================================
+  publish:
+    name: 📤 Publish the binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [resolve, build]
+    if: github.event.inputs.dry_run != 'true'
+    permissions:
+      contents: write # create the release when missing, upload its assets
+      id-token: write # sign the build-provenance attestations
+      attestations: write # store them
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: 📥 Download the archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+      - name: 🔢 Write SHA256SUMS
+        working-directory: dist
+        run: |
+          count=$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "::error::Expected 5 archives, found $count."
+            exit 1
+          fi
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+      - name: 🔏 Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - name: 🏷️ Create the release if the tag has none
+        run: |
+          if ! gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "v$VERSION" --generate-notes
+          fi
+      - name: 📤 Upload the assets
+        run: gh release upload "v$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+      - name: 📝 Summary
+        run: |
+          {
+            echo "## 📦 Binaries for v$VERSION"
+            echo ""
+            echo "Release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/v$VERSION"
+            echo ""
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

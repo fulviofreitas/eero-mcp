@@ -1,0 +1,95 @@
+# ============================================================================
+# 🔄 Renovate - Automated Dependency Updates
+# ============================================================================
+# Runs Renovate with the ff-renovate GitHub App token (better rate limits than GITHUB_TOKEN, and
+# its pull requests start CI). The rules live in .github/renovate.json5: cargo and GitHub Actions
+# minor/patch updates are grouped and auto-merged once CI is green; major updates and every
+# rusteero bump wait for a human review.
+#
+# Triggers: every 6 hours, and workflow_dispatch (dry run, log level, cache reset).
+#
+# Pinning: as in ci.yml; the workflow-arsenal pin records the date it was taken and is bumped by
+# hand.
+# ============================================================================
+
+name: 🔄 Renovate
+
+on:
+  schedule:
+    # Every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)
+    - cron: "0 */6 * * *"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "🧪 Dry-run mode (no PRs created)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      log_level:
+        description: "📝 Log level"
+        required: false
+        default: "info"
+        type: choice
+        options:
+          - "debug"
+          - "info"
+          - "warn"
+      reset_cache:
+        description: "🗑️ Reset repository cache"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+# Renovate works through the App token; GITHUB_TOKEN only checks out the config and keeps
+# Renovate's repository cache between runs.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  renovate:
+    name: 🔄 Renovate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 🔄 Run Renovate
+        uses: fulviofreitas/workflow-arsenal/.github/actions/renovate@642407a86382c004118624fd9df69b356cb698fb # master @ 2026-11-02
+        with:
+          app-id: ${{ secrets.RENOVATE_APP_ID }}
+          app-private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          config-file: ".github/renovate.json5"
+          dry-run: ${{ github.event.inputs.dry_run || 'false' }}
+          log-level: ${{ github.event.inputs.log_level || 'info' }}
+          reset-cache: ${{ github.event.inputs.reset_cache || 'false' }}
+
+      - name: 📝 Generate summary
+        if: always()
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          {
+            echo "## 🔄 Renovate Summary"
+            echo ""
+            echo "| Property | Value |"
+            echo "|:---------|:------|"
+            echo "| 📦 Repository | \`${GITHUB_REPOSITORY}\` |"
+            echo "| 🎯 Trigger | \`${EVENT}\` |"
+            echo "| 🧪 Dry Run | \`${DRY_RUN}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
