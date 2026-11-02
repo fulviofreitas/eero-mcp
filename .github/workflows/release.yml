@@ -181,7 +181,7 @@ jobs:
             echo "::error::v$version is not on master."
             exit 1
           fi
-          tagged=$(git show "refs/tags/v$version:Cargo.toml" | sed -n '0,/^version = /s/^version = "\(.*\)"$/\1/p')
+          tagged=$(git show "refs/tags/v$version:Cargo.toml" | awk -F'"' '/^version = /{print $2; exit}')
           if [ "$tagged" != "$version" ]; then
             echo "::error::Cargo.toml at v$version says version \"$tagged\"."
             exit 1

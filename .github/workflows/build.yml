@@ -98,7 +98,8 @@ jobs:
         env:
           EXPECTED: ${{ inputs.version }}
         run: |
-          manifest=$(sed -n '0,/^version = /s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          # The first `version =` line is the package's (portable awk: macOS has BSD sed).
+          manifest=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
           if [ -z "$manifest" ]; then
             echo "::error::No package version found in Cargo.toml."
             exit 1
@@ -145,7 +146,8 @@ jobs:
           fi
           if [ "$RUNNER_OS" = "Linux" ]; then
             file "$bin"
-            if ! file "$bin" | grep -q 'statically linked'; then
+            # x86_64 musl links a static PIE ("static-pie linked"), aarch64 "statically linked".
+            if ! file "$bin" | grep -qE 'static(ally|-pie) linked'; then
               echo "::error::The Linux binary is not statically linked."
               exit 1
             fi
