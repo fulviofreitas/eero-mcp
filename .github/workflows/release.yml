@@ -195,6 +195,8 @@ jobs:
   build:
     name: 📦 Binaries
     needs: resolve
+    # Explicit: the default success() also looks at `release`, which a build_version run skips.
+    if: always() && needs.resolve.result == 'success'
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ needs.resolve.outputs.ref }}
@@ -208,7 +210,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [resolve, build]
-    if: github.event.inputs.dry_run != 'true'
+    if: |
+      always() &&
+      needs.resolve.result == 'success' && needs.build.result == 'success' &&
+      github.event.inputs.dry_run != 'true'
     permissions:
       contents: write # create the release when missing, upload its assets
       id-token: write # sign the build-provenance attestations
