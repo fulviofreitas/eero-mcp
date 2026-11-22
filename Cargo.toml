@@ -30,7 +30,7 @@ keyring = ["rusteero/keyring", "dep:keyring"]
 # From crates.io. Default features off: `keyring` above re-enables its own.
 rusteero = { version = "3.0.1", default-features = false }
 # The dependency must be named `rmcp`: its macros refer to the crate by that name.
-rmcp = { version = "3.7", features = ["server", "macros", "schemars", "transport-io", "elicitation"] }
+rmcp = { version = "3.9", features = ["server", "macros", "schemars", "transport-io", "elicitation"] }
 # Same version as rusteero's, so cargo unifies it. Used only for the raw, read-only entry reads
 # (eero-mcp's own entry and the shared one); writes go through rusteero's keyring store.
 keyring = { version = "4.2", optional = true }
@@ -47,7 +47,7 @@ anyhow = "1"
 
 [dev-dependencies]
 # Test-only: the in-process MCP client. The shipped binary never gets the `client` feature.
-rmcp = { version = "3.7", features = ["client"] }
+rmcp = { version = "3.9", features = ["client"] }
 wiremock = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 anyhow = "1"

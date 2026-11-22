@@ -16,6 +16,10 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; keyring's secret-service chain still pins zbus 5" },
+  # chrono is not a direct dependency: rmcp depends on it unconditionally (and enables schemars'
+  # `chrono04` feature), so no feature or update removes it. Maintenance notice, not a
+  # vulnerability; eero-mcp parses and formats time with jiff. Drop once rmcp leaves chrono.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained: arrives only through rmcp (unconditional) and schemars' chrono04 feature; no direct use" },
 ]
 
 [licenses]
