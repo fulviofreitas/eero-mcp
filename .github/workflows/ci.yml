@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: 📝 Validate commits
-        uses: fulviofreitas/workflow-arsenal/.github/actions/commitlint@c17dd34cd4f607a9d2760217b8445a20d18e1837 # master @ 2026-10-23
+        uses: fulviofreitas/workflow-arsenal/.github/actions/commitlint@2087aa01c13f842fc566101ceeb9a4a49ec2a370 # master
         with:
           from-sha: ${{ github.event.pull_request.base.sha }}
           to-sha: ${{ github.event.pull_request.head.sha }}
