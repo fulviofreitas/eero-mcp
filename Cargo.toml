@@ -27,8 +27,9 @@ default = ["keyring"]
 keyring = ["rusteero/keyring", "dep:keyring"]
 
 [dependencies]
-# From crates.io. Default features off: `keyring` above re-enables its own.
-rusteero = { version = "3.0.1", default-features = false }
+# From crates.io, 3.0.3 or later (the release this tree is tested with).
+# Default features off: `keyring` above re-enables its own.
+rusteero = { version = "3.0.3", default-features = false }
 # The dependency must be named `rmcp`: its macros refer to the crate by that name.
 rmcp = { version = "3.9", features = ["server", "macros", "schemars", "transport-io", "elicitation"] }
 # Same version as rusteero's, so cargo unifies it. Used only for the raw, read-only entry reads
@@ -42,7 +43,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 secrecy = "0.10"
 jiff = "1.0"
-url = "2.5"
+# 2.5.9 or later: earlier releases overflow the stack in Url::origin (RUSTSEC-2026-0592).
+url = "2.5.9"
 anyhow = "1"
 
 [dev-dependencies]
