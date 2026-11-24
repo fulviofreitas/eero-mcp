@@ -11,5 +11,5 @@ repository-code: "https://github.com/fulviofreitas/eero-mcp"
 license: MIT
 # Unreleased: no release tag exists yet. The release job rewrites `version` and `date-released`
 # (see .releaserc.json), so both values describe the development version until the first release.
-version: "0.2.1"
-date-released: "2026-11-22"
+version: "0.2.2"
+date-released: "2026-11-24"
